@@ -53,6 +53,14 @@ async fn main() -> Result<()> {
     let history = client.get_history(10).await?;
     let search_rust = client.search("Rust*", 5).await?;
 
+    // Test toggle_pin on first item
+    if let Some(first) = history.first() {
+        if let Some(id) = first.id {
+            client.toggle_pin(id).await?;
+            log::info!("Toggled pin state for entry id={}", id);
+        }
+    }
+
     println!("VERIFY: ipc_socket_ok=true, history_len={}, search_rust_len={}", history.len(), search_rust.len());
     println!("VERIFY: wayland_c_available={},", wayland_c_support);
     println!("VERIFY: x11_c_available={},", x11_support);

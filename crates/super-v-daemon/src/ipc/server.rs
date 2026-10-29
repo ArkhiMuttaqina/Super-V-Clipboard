@@ -74,16 +74,28 @@ impl IpcServer {
                         Err(e) => IpcResponse::Error(e.to_string()),
                     }
                 }
+                Ok(IpcRequest::TogglePin { id }) => {
+                    let mut db = db.lock().await;
+                    match db.toggle_pin(id) {
+                        Ok(_) => IpcResponse::Ack,
+                        Err(e) => IpcResponse::Error(e.to_string()),
+                    }
+                }
+                Ok(IpcRequest::DeleteItem { id }) => {
+                    let mut db = db.lock().await;
+                    match db.delete_entry(id) {
+                        Ok(_) => IpcResponse::Ack,
+                        Err(e) => IpcResponse::Error(e.to_string()),
+                    }
+                }
                 Ok(IpcRequest::ClearUnpinned) => {
-                    IpcResponse::Ack
+                    let mut db = db.lock().await;
+                    match db.clear_unpinned() {
+                        Ok(_) => IpcResponse::Ack,
+                        Err(e) => IpcResponse::Error(e.to_string()),
+                    }
                 }
                 Ok(IpcRequest::PasteItem { id: _ }) => {
-                    IpcResponse::Ack
-                }
-                Ok(IpcRequest::TogglePin { id: _ }) => {
-                    IpcResponse::Ack
-                }
-                Ok(IpcRequest::DeleteItem { id: _ }) => {
                     IpcResponse::Ack
                 }
                 Err(e) => IpcResponse::Error(format!("Malformed request: {}", e)),

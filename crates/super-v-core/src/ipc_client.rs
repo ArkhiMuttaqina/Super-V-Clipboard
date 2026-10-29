@@ -49,4 +49,28 @@ impl IpcClient {
             other => Err(anyhow!("Unexpected response: {:?}", other)),
         }
     }
+
+    pub async fn toggle_pin(&mut self, id: i64) -> Result<()> {
+        match self.send_request(&IpcRequest::TogglePin { id }).await? {
+            IpcResponse::Ack => Ok(()),
+            IpcResponse::Error(e) => Err(anyhow!("Daemon error: {}", e)),
+            other => Err(anyhow!("Unexpected response: {:?}", other)),
+        }
+    }
+
+    pub async fn delete_item(&mut self, id: i64) -> Result<()> {
+        match self.send_request(&IpcRequest::DeleteItem { id }).await? {
+            IpcResponse::Ack => Ok(()),
+            IpcResponse::Error(e) => Err(anyhow!("Daemon error: {}", e)),
+            other => Err(anyhow!("Unexpected response: {:?}", other)),
+        }
+    }
+
+    pub async fn clear_unpinned(&mut self) -> Result<()> {
+        match self.send_request(&IpcRequest::ClearUnpinned).await? {
+            IpcResponse::Ack => Ok(()),
+            IpcResponse::Error(e) => Err(anyhow!("Daemon error: {}", e)),
+            other => Err(anyhow!("Unexpected response: {:?}", other)),
+        }
+    }
 }

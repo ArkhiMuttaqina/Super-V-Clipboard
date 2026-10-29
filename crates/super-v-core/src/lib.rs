@@ -22,6 +22,14 @@ pub struct ClipboardItem {
     pub created_at: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortOrder {
+    Recent,
+    PinnedFirst,
+    Alphabetical,
+    SizeDesc,
+}
+
 pub struct Database {
     conn: Connection,
 }
@@ -42,13 +50,13 @@ impl Database {
              );
              CREATE INDEX IF NOT EXISTS idx_entries_created ON entries(created_at DESC);
              CREATE INDEX IF NOT EXISTS idx_entries_pinned ON entries(is_pinned);
-             
+
              CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(
                  text,
                  content='entries',
                  content_rowid='id'
              );
-             
+
              CREATE TRIGGER IF NOT EXISTS entries_ai AFTER INSERT ON entries BEGIN
                  INSERT INTO entries_fts(rowid, text) VALUES (new.id, new.text);
              END;
@@ -92,13 +100,55 @@ impl Database {
         })
     }
 
-    pub fn list_recent(&self, limit: usize) -> Result<Vec<ClipboardItem>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, hash, mime, text, blob_path, is_pinned, byte_size, created_at
-             FROM entries
-             ORDER BY is_pinned DESC, created_at DESC
-             LIMIT ?1",
+    pub fn toggle_pin(&mut self, id: i64) -> Result<bool> {
+        self.conn.execute(
+            "UPDATE entries SET is_pinned = NOT is_pinned WHERE id = ?1",
+            params![id],
         )?;
+        let mut stmt = self.conn.prepare("SELECT is_pinned FROM entries WHERE id = ?1")?;
+        let is_pinned: bool = stmt.query_row(params![id], |row| row.get(0))?;
+        Ok(is_pinned)
+    }
+
+    pub fn delete_entry(&mut self, id: i64) -> Result<()> {
+        self.conn.execute("DELETE FROM entries WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    pub fn clear_unpinned(&mut self) -> Result<usize> {
+        let count = self.conn.execute("DELETE FROM entries WHERE is_pinned = 0", [])?;
+        Ok(count)
+    }
+
+    pub fn list_ordered(&self, limit: usize, sort: SortOrder) -> Result<Vec<ClipboardItem>> {
+        let query = match sort {
+            SortOrder::Recent => {
+                "SELECT id, hash, mime, text, blob_path, is_pinned, byte_size, created_at
+                 FROM entries
+                 ORDER BY created_at DESC
+                 LIMIT ?1"
+            }
+            SortOrder::PinnedFirst => {
+                "SELECT id, hash, mime, text, blob_path, is_pinned, byte_size, created_at
+                 FROM entries
+                 ORDER BY is_pinned DESC, created_at DESC
+                 LIMIT ?1"
+            }
+            SortOrder::Alphabetical => {
+                "SELECT id, hash, mime, text, blob_path, is_pinned, byte_size, created_at
+                 FROM entries
+                 ORDER BY text ASC
+                 LIMIT ?1"
+            }
+            SortOrder::SizeDesc => {
+                "SELECT id, hash, mime, text, blob_path, is_pinned, byte_size, created_at
+                 FROM entries
+                 ORDER BY byte_size DESC
+                 LIMIT ?1"
+            }
+        };
+
+        let mut stmt = self.conn.prepare(query)?;
         let rows = stmt.query_map([limit], |row| {
             Ok(ClipboardItem {
                 id: Some(row.get(0)?),
@@ -117,6 +167,10 @@ impl Database {
             items.push(r?);
         }
         Ok(items)
+    }
+
+    pub fn list_recent(&self, limit: usize) -> Result<Vec<ClipboardItem>> {
+        self.list_ordered(limit, SortOrder::PinnedFirst)
     }
 
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<ClipboardItem>> {
