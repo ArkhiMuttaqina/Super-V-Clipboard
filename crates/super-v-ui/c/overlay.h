@@ -5,14 +5,14 @@
 extern "C" {
 #endif
 
-int super_v_ui_init(int *argc, char ***argv);
-void super_v_ui_check_versions(char *buf, int max_len);
+// Runs the full Adwaita GUI Application (event loop)
+int super_v_ui_run_app(int argc, char **argv);
 
-// Constructs the overlay window with Adwaita widgets
-void* super_v_ui_create_window(void);
+// Non-blocking pre-warm check for benchmarks & headless testing
+int super_v_ui_test_prewarm(char *version_buf, int max_len);
 
-// Toggles visibility of the overlay window
-void super_v_ui_set_visible(void *window, int visible);
+// Shows the settings preferences window
+void super_v_ui_show_settings(void *parent_window);
 
 #ifdef __cplusplus
 }

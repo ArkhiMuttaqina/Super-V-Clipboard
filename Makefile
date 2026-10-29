@@ -20,13 +20,29 @@ install: build
 	install -m 644 data/super-v-clipboard.service $(HOME)/.config/systemd/user/super-v-clipboard.service
 	mkdir -p $(HOME)/.local/share/applications
 	install -m 644 data/super-v-clipboard.desktop $(HOME)/.local/share/applications/super-v-clipboard.desktop
-	@echo "Installation complete into $(BINDIR)"
+	@echo "Updating desktop database..."
+	@update-desktop-database $(HOME)/.local/share/applications 2>/dev/null || true
+	@echo "Enabling & starting systemd service..."
+	@systemctl --user daemon-reload 2>/dev/null || true
+	@systemctl --user enable --now super-v-clipboard.service 2>/dev/null || true
+	@echo "Auto-applying GNOME Super+V shortcut & running diagnostics..."
+	@$(BINDIR)/super-v-ui --check
+	@echo "=========================================================="
+	@echo " Installation & Auto-Configuration Complete!"
+	@echo " Press Super+V or launch 'Super-V Clipboard' from Drawer."
+	@echo "=========================================================="
 
 uninstall:
+	systemctl --user stop super-v-clipboard.service 2>/dev/null || true
+	systemctl --user disable super-v-clipboard.service 2>/dev/null || true
 	rm -f $(BINDIR)/super-v-daemon
 	rm -f $(BINDIR)/super-v-ui
 	rm -f $(HOME)/.config/systemd/user/super-v-clipboard.service
 	rm -f $(HOME)/.local/share/applications/super-v-clipboard.desktop
+	update-desktop-database $(HOME)/.local/share/applications 2>/dev/null || true
 	@echo "Uninstallation complete"
 
-.PHONY: all build install uninstall
+check:
+	$(BINDIR)/super-v-ui --check
+
+.PHONY: all build install uninstall check
