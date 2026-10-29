@@ -25,6 +25,11 @@ async fn main() -> Result<()> {
     log::info!("Search results for 'Rust*': found {}", search_results.len());
     assert!(!search_results.is_empty(), "FTS5 search should find matched entry");
     
+    // Verify native C FFI module link
+    let x11_support = super_v_backend_x11::X11Backend::new().is_ok();
+    log::info!("Native C X11 XTest availability: {}", x11_support);
+
+    println!("VERIFY: x11_c_available={},", x11_support);
     println!("VERIFY: compositor={}, search_count={}", comp_str, search_results.len());
     Ok(())
 }

@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/super-v-backend-x11",
     "crates/super-v-core",
     "crates/super-v-daemon",
     "crates/super-v-ui",
@@ -13,6 +14,8 @@ authors = ["Arkhi Muttaqina <arkhims@users.noreply.github.com>"]
 license = "GPL-3.0-or-later"
 
 [workspace.dependencies]
+libc = "0.2"
+cc = "1.0"
 tokio = { version = "1.40", features = ["full"] }
 rusqlite = { version = "0.32", features = ["bundled", "bundled-full"] }
 serde = { version = "1.0", features = ["derive"] }
