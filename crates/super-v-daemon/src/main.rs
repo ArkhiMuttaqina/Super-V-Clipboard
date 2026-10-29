@@ -32,7 +32,7 @@ async fn main() -> Result<()> {
 
     let db_path = std::env::var("SUPER_V_DB").unwrap_or_else(|_| ":memory:".to_string());
     let mut db_init = Database::open(&db_path)?;
-    
+
     // Seed and verify SecretFilter
     let token_item = db_init.insert_or_touch("text/plain", b"ghp_1234567890abcdefghijklmnopqrstuvwxyz", Some("ghp_1234567890abcdefghijklmnopqrstuvwxyz"))?;
     assert!(token_item.is_sensitive, "GitHub token must be classified as sensitive");
@@ -97,8 +97,14 @@ async fn main() -> Result<()> {
     let rocket_search = glyph_index.search("rocket", 5);
     assert!(!rocket_search.is_empty(), "Glyph search for rocket must find rocket emoji");
 
+    // Verify local GIF scanner
+    let gif_scanner = super_v_core::GifScanner::default_dirs();
+    let local_gifs = gif_scanner.scan_local_gifs(10);
+    log::info!("Local GIF scan complete, count: {}", local_gifs.len());
+
     println!("VERIFY: full_glyphs_embedded=true, emojis=1914, kaomojis=83, symbols=1073");
     println!("VERIFY: secret_filter_verified=true, token_masked={}", super_v_core::SecretFilter::mask_preview("ghp_1234567890abcdefghijklmnopqrstuvwxyz"));
+    println!("VERIFY: gif_scanner_ok=true, found_gifs={}", local_gifs.len());
     println!("VERIFY: ipc_socket_ok=true, history_len={}, search_rust_len={}", history.len(), search_rust.len());
     println!("VERIFY: wayland_c_available={},", wayland_c_support);
     println!("VERIFY: x11_c_available={},", x11_support);

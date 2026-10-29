@@ -3,6 +3,7 @@
 pub mod backend;
 pub mod blob_store;
 pub mod classifier;
+pub mod gif_scanner;
 pub mod glyphs;
 pub mod ipc;
 pub mod ipc_client;
@@ -15,6 +16,7 @@ use std::path::Path;
 
 pub use blob_store::BlobStore;
 pub use classifier::ContentCategory;
+pub use gif_scanner::{GifItem, GifScanner};
 pub use secret_filter::SecretFilter;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
