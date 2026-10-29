@@ -1,0 +1,13 @@
+[Unit]
+Description=Super-V Clipboard Daemon
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/super-v-daemon
+Restart=on-failure
+RestartSec=2s
+
+[Install]
+WantedBy=graphical-session.target
