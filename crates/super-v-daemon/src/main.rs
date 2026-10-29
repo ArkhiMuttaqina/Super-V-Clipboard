@@ -32,6 +32,8 @@ async fn main() -> Result<()> {
     let db_path = std::env::var("SUPER_V_DB").unwrap_or_else(|_| ":memory:".to_string());
     let mut db_init = Database::open(&db_path)?;
     db_init.insert_or_touch("text/plain", b"Important API token 12345", Some("Important API token 12345"))?;
+    db_init.insert_or_touch("text/plain", b"#308b53", Some("#308b53"))?;
+    db_init.insert_or_touch("text/plain", b"https://github.com/GNOME/gnome-shell", Some("https://github.com/GNOME/gnome-shell"))?;
     db_init.insert_or_touch("text/plain", b"Rust programming language", Some("Rust programming language"))?;
 
     let db = Arc::new(Mutex::new(db_init));
