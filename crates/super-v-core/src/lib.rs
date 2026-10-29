@@ -1,5 +1,7 @@
 //! Core data models, SQLite storage, and deduplication engine for super-v-clipboard.
 
+pub mod glyphs;
+
 use anyhow::Result;
 use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
