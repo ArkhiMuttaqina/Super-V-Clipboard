@@ -3,6 +3,7 @@
 pub mod backend;
 pub mod glyphs;
 pub mod ipc;
+pub mod ipc_client;
 
 use anyhow::Result;
 use rusqlite::{params, Connection};
@@ -48,7 +49,6 @@ impl Database {
                  content_rowid='id'
              );
              
-             -- Triggers to keep FTS5 synchronized with entries
              CREATE TRIGGER IF NOT EXISTS entries_ai AFTER INSERT ON entries BEGIN
                  INSERT INTO entries_fts(rowid, text) VALUES (new.id, new.text);
              END;
