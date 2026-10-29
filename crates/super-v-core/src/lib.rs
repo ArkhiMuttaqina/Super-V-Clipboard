@@ -1,6 +1,8 @@
 //! Core data models, SQLite storage, and deduplication engine for super-v-clipboard.
 
+pub mod backend;
 pub mod glyphs;
+pub mod ipc;
 
 use anyhow::Result;
 use rusqlite::{params, Connection};
@@ -44,7 +46,19 @@ impl Database {
                  text,
                  content='entries',
                  content_rowid='id'
-             );",
+             );
+             
+             -- Triggers to keep FTS5 synchronized with entries
+             CREATE TRIGGER IF NOT EXISTS entries_ai AFTER INSERT ON entries BEGIN
+                 INSERT INTO entries_fts(rowid, text) VALUES (new.id, new.text);
+             END;
+             CREATE TRIGGER IF NOT EXISTS entries_ad AFTER DELETE ON entries BEGIN
+                 INSERT INTO entries_fts(entries_fts, rowid, text) VALUES('delete', old.id, old.text);
+             END;
+             CREATE TRIGGER IF NOT EXISTS entries_au AFTER UPDATE ON entries BEGIN
+                 INSERT INTO entries_fts(entries_fts, rowid, text) VALUES('delete', old.id, old.text);
+                 INSERT INTO entries_fts(rowid, text) VALUES (new.id, new.text);
+             END;",
         )?;
         Ok(Self { conn })
     }
@@ -86,6 +100,35 @@ impl Database {
              LIMIT ?1",
         )?;
         let rows = stmt.query_map([limit], |row| {
+            Ok(ClipboardItem {
+                id: Some(row.get(0)?),
+                hash: row.get(1)?,
+                mime: row.get(2)?,
+                text: row.get(3)?,
+                blob_path: row.get(4)?,
+                is_pinned: row.get(5)?,
+                byte_size: row.get(6)?,
+                created_at: row.get(7)?,
+            })
+        })?;
+
+        let mut items = Vec::new();
+        for r in rows {
+            items.push(r?);
+        }
+        Ok(items)
+    }
+
+    pub fn search(&self, query: &str, limit: usize) -> Result<Vec<ClipboardItem>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT e.id, e.hash, e.mime, e.text, e.blob_path, e.is_pinned, e.byte_size, e.created_at
+             FROM entries e
+             JOIN entries_fts fts ON e.id = fts.rowid
+             WHERE entries_fts MATCH ?1
+             ORDER BY e.is_pinned DESC, e.created_at DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![query, limit], |row| {
             Ok(ClipboardItem {
                 id: Some(row.get(0)?),
                 hash: row.get(1)?,

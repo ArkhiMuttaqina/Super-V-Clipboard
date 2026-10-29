@@ -1,20 +1,30 @@
 use anyhow::Result;
-use super_v_core::Database;
+use super_v_core::{backend::CompositorType, Database};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::init();
-    log::info!("Starting super-v-clipboard daemon...");
+    
+    let comp = CompositorType::detect();
+    let comp_str = match comp {
+        CompositorType::GnomeWayland => "GNOME Wayland (target GNOME 51)",
+        CompositorType::HyprlandWlroots => "Hyprland / wlroots Wayland",
+        CompositorType::X11 => "X11 Display",
+        CompositorType::Unknown => "Unknown Display",
+    };
+    log::info!("Detected compositor environment: {}", comp_str);
     
     let db_path = std::env::var("SUPER_V_DB").unwrap_or_else(|_| ":memory:".to_string());
     let mut db = Database::open(&db_path)?;
     
-    // Sample test entry
-    let item = db.insert_or_touch("text/plain", b"Hello, super-v-clipboard!", Some("Hello, super-v-clipboard!"))?;
-    log::info!("Stored clipboard entry: id={:?}, hash={}", item.id, item.hash);
+    // Seed and verify search
+    db.insert_or_touch("text/plain", b"Important API token 12345", Some("Important API token 12345"))?;
+    db.insert_or_touch("text/plain", b"Rust programming language", Some("Rust programming language"))?;
     
-    let items = db.list_recent(10)?;
-    log::info!("Recent items: count={}", items.len());
+    let search_results = db.search("Rust*", 5)?;
+    log::info!("Search results for 'Rust*': found {}", search_results.len());
+    assert!(!search_results.is_empty(), "FTS5 search should find matched entry");
     
+    println!("VERIFY: compositor={}, search_count={}", comp_str, search_results.len());
     Ok(())
 }
