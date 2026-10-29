@@ -3,15 +3,17 @@ use std::env;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
 
+#[allow(dead_code)]
 extern "C" {
     fn super_v_ui_run_app(argc: c_int, argv: *mut *mut c_char) -> c_int;
     fn super_v_ui_test_prewarm(version_buf: *mut c_char, max_len: c_int) -> c_int;
+    fn super_v_ui_add_history_item(title: *const c_char, subtitle: *const c_char, is_pinned: c_int, is_sensitive: c_int, id: libc::c_longlong);
+    fn super_v_ui_clear_history_items();
 }
 
 fn run_diagnostics_and_autofix() -> Result<()> {
     println!("=== Super-V Clipboard Self-Diagnostics & Auto-Fix ===");
-    
-    // 1. Check Display Environment
+
     let wayland = env::var("WAYLAND_DISPLAY").ok();
     let x11 = env::var("DISPLAY").ok();
     println!("[1/4] Display Server:");
@@ -23,7 +25,6 @@ fn run_diagnostics_and_autofix() -> Result<()> {
         println!("      ✗ No graphical display found ($WAYLAND_DISPLAY or $DISPLAY missing)");
     }
 
-    // 2. Check Daemon Process & Auto-Start
     println!("[2/4] Daemon Status:");
     let daemon_running = std::process::Command::new("pgrep")
         .arg("-x")
@@ -36,13 +37,11 @@ fn run_diagnostics_and_autofix() -> Result<()> {
         println!("      ✓ super-v-daemon is running");
     } else {
         println!("      ! super-v-daemon not detected. Auto-launching daemon in background...");
-        let _ = std::process::Command::new("super-v-daemon")
-            .spawn();
+        let _ = std::process::Command::new("super-v-daemon").spawn();
         std::thread::sleep(std::time::Duration::from_millis(200));
         println!("      ✓ super-v-daemon started successfully");
     }
 
-    // 3. Check Custom Shortcut (Super+V) in GNOME
     println!("[3/4] GNOME Shortcut Auto-Check & Auto-Apply:");
     let gsettings_check = std::process::Command::new("gsettings")
         .args(["get", "org.gnome.settings-daemon.plugins.media-keys", "custom-keybindings"])
@@ -72,7 +71,6 @@ fn run_diagnostics_and_autofix() -> Result<()> {
         }
     }
 
-    // 4. Check Desktop Entry
     println!("[4/4] Desktop Entry & Drawer Registration:");
     let desktop_path = format!("{}/.local/share/applications/super-v-clipboard.desktop", env::var("HOME").unwrap_or_default());
     if std::path::Path::new(&desktop_path).exists() {
@@ -84,8 +82,7 @@ fn run_diagnostics_and_autofix() -> Result<()> {
         println!("      ! Desktop entry missing, creating...");
     }
 
-    println!("
-Diagnostics complete. All systems healthy.");
+    println!("\nDiagnostics complete. All systems healthy.");
     Ok(())
 }
 
@@ -107,7 +104,6 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Auto-check and auto-start daemon if not already running
     let daemon_check = std::process::Command::new("pgrep")
         .arg("-x")
         .arg("super-v-daemon")
@@ -120,7 +116,6 @@ fn main() -> Result<()> {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
 
-    // Convert args to C strings for GApplication / AdwApplication
     let c_args: Vec<CString> = args
         .iter()
         .map(|arg| CString::new(arg.as_str()).unwrap_or_default())

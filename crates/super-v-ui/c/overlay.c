@@ -5,6 +5,7 @@
 #include <string.h>
 
 static GtkWidget *g_main_window = NULL;
+static GtkWidget *g_clip_list = NULL;
 
 static void on_settings_clicked(GtkButton *btn, gpointer user_data) {
     (void)btn;
@@ -91,6 +92,40 @@ void super_v_ui_show_settings(void *parent_window) {
     }
 }
 
+void super_v_ui_clear_history_items(void) {
+    if (!g_clip_list) return;
+    GtkWidget *child = gtk_widget_get_first_child(g_clip_list);
+    while (child != NULL) {
+        GtkWidget *next = gtk_widget_get_next_sibling(child);
+        gtk_list_box_remove(GTK_LIST_BOX(g_clip_list), child);
+        child = next;
+    }
+}
+
+void super_v_ui_add_history_item(const char *title, const char *subtitle, int is_pinned, int is_sensitive, long long id) {
+    (void)id;
+    if (!g_clip_list) return;
+
+    GtkWidget *row = adw_action_row_new();
+    if (is_sensitive) {
+        adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row), "•••••••• (Sensitive Content Hidden)");
+    } else {
+        adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row), title ? title : "(Empty)");
+    }
+
+    if (subtitle) {
+        adw_action_row_set_subtitle(ADW_ACTION_ROW(row), subtitle);
+    }
+
+    if (is_pinned) {
+        GtkWidget *pin_icon = gtk_image_new_from_icon_name("view-pin-symbolic");
+        gtk_widget_set_tooltip_text(pin_icon, "Pinned Item");
+        adw_action_row_add_prefix(ADW_ACTION_ROW(row), pin_icon);
+    }
+
+    gtk_list_box_append(GTK_LIST_BOX(g_clip_list), row);
+}
+
 static GtkWidget* create_main_window(AdwApplication *app) {
     GtkWidget *window = adw_application_window_new(GTK_APPLICATION(app));
     gtk_window_set_title(GTK_WINDOW(window), "Super-V Clipboard");
@@ -126,35 +161,21 @@ static GtkWidget* create_main_window(AdwApplication *app) {
 
     // TAB 1: Clipboard History
     GtkWidget *clip_scroll = gtk_scrolled_window_new();
-    GtkWidget *clip_list = gtk_list_box_new();
-    gtk_list_box_set_selection_mode(GTK_LIST_BOX(clip_list), GTK_SELECTION_SINGLE);
-    gtk_widget_add_css_class(clip_list, "boxed-list");
-    gtk_widget_set_margin_start(clip_list, 12);
-    gtk_widget_set_margin_end(clip_list, 12);
-    gtk_widget_set_margin_top(clip_list, 6);
-    gtk_widget_set_margin_bottom(clip_list, 6);
+    g_clip_list = gtk_list_box_new();
+    gtk_list_box_set_selection_mode(GTK_LIST_BOX(g_clip_list), GTK_SELECTION_SINGLE);
+    gtk_widget_add_css_class(g_clip_list, "boxed-list");
+    gtk_widget_set_margin_start(g_clip_list, 12);
+    gtk_widget_set_margin_end(g_clip_list, 12);
+    gtk_widget_set_margin_top(g_clip_list, 6);
+    gtk_widget_set_margin_bottom(g_clip_list, 6);
 
-    // Sample active history items
-    const char *sample_history[] = {
-        "📌 Important: cargo build --workspace",
-        "https://github.com/GNOME/gnome-shell/tree/51.1",
-        "Super-V ultra-low latency native clipboard",
-        "SQLite FTS5 + WAL search cache",
-        "Adwaita ViewStack & ViewSwitcherBar"
-    };
-    for (size_t i = 0; i < 5; i++) {
-        GtkWidget *row = adw_action_row_new();
-        adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row), sample_history[i]);
-        if (i == 0) {
-            adw_action_row_set_subtitle(ADW_ACTION_ROW(row), "Pinned • Just now");
-        } else {
-            char sub[64];
-            snprintf(sub, sizeof(sub), "Item #%zu • 2 mins ago", i);
-            adw_action_row_set_subtitle(ADW_ACTION_ROW(row), sub);
-        }
-        gtk_list_box_append(GTK_LIST_BOX(clip_list), row);
-    }
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(clip_scroll), clip_list);
+    // Populate initial items
+    super_v_ui_add_history_item("Important: cargo build --workspace", "Pinned • Just now", 1, 0, 1);
+    super_v_ui_add_history_item("https://github.com/GNOME/gnome-shell/tree/51.1", "URL • 2 mins ago", 0, 0, 2);
+    super_v_ui_add_history_item("ghp_1234567890abcdefghijklmnopqrstuvwxyz", "Secret Token • 5 mins ago", 0, 1, 3);
+    super_v_ui_add_history_item("#308b53 (Accent Green)", "Color • 10 mins ago", 0, 0, 4);
+
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(clip_scroll), g_clip_list);
     adw_view_stack_add_titled(stack, clip_scroll, "clipboard", "Clipboard");
 
     // TAB 2: Emoji
