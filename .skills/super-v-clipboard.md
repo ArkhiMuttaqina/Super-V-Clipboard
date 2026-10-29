@@ -35,3 +35,7 @@ Building and maintaining **super-v-clipboard** — an ultra-lightweight, crash-r
 - Keep activation latency under **16ms (1 frame at 60Hz)**.
 - Pre-warm GTK4 context or keep the daemon resident in memory with hidden layer surface.
 - Keyboard-first navigation: `Up`/`Down` for list, `1-9` quick paste, `Tab`/`Shift+Tab` for category switching, `/` for search, `Esc` to dismiss.
+
+## Discovered Lessons & Gotchas (self:: to be clear)
+- **Static Glyph Structs:** When embedding pre-compiled datasets (Emoji, Kaomoji, Symbols), derive only `Serialize` on static borrowed slices (`&'static [&'static str]`). Deriving `Deserialize` fails compilation due to lack of runtime buffer ownership.
+- **Process Decoupling:** Never run UI rendering in the same thread or process as clipboard monitoring. When Mutter or Hyprland events spike, a detached Tokio daemon ensures zero frame drop and zero compositor crashes.
