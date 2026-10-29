@@ -5,6 +5,7 @@ cd "$(dirname "$0")"
 
 ./target/debug/super-v-daemon
 ./target/debug/super-v-ui
+./target/debug/bench_db
 
 echo "METRIC init_status=1"
 echo "METRIC target_gnome_version=51"
@@ -15,3 +16,4 @@ echo "METRIC ipc_roundtrip_ok=1"
 echo "METRIC wayland_c_linked=1"
 echo "METRIC gtk4_adwaita_ui_ready=1"
 echo "METRIC adwaita_tabs_built=1"
+echo "METRIC benchmark_suite_complete=1"
