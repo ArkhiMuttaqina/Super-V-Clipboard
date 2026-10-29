@@ -1,47 +1,88 @@
-//! Glyph models and static datasets for Emoji, Kaomoji, and Symbols.
+//! Full static glyph datasets (1,914 Emojis, 83 Kaomojis, 1,073 Symbols) with search indexing.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize)]
-pub struct EmojiEntry {
-    pub char: &'static str,
-    pub name: &'static str,
-    pub category: &'static str,
-    pub keywords: &'static [&'static str],
+pub static EMOJIS_RAW: &str = include_str!("../../../data/glyphs/emojis.json");
+pub static KAOMOJI_RAW: &str = include_str!("../../../data/glyphs/kaomojis.json");
+pub static SYMBOLS_RAW: &str = include_str!("../../../data/glyphs/symbols.json");
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawGlyph {
+    #[serde(rename = "c")]
+    pub char: String,
+    #[serde(rename = "n")]
+    pub name: String,
+    #[serde(rename = "g", default)]
+    pub group: usize,
+    #[serde(rename = "k", default)]
+    pub keywords: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct KaomojiEntry {
-    pub text: &'static str,
-    pub category: &'static str,
-    pub description: &'static str,
+pub struct GlyphIndex {
+    emojis: Vec<RawGlyph>,
+    kaomojis: Vec<RawGlyph>,
+    symbols: Vec<RawGlyph>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct SymbolEntry {
-    pub char: &'static str,
-    pub name: &'static str,
-    pub category: &'static str,
+impl GlyphIndex {
+    pub fn load_embedded() -> Self {
+        let emojis: Vec<RawGlyph> = serde_json::from_str(EMOJIS_RAW).unwrap_or_default();
+        let kaomojis: Vec<RawGlyph> = serde_json::from_str(KAOMOJI_RAW).unwrap_or_default();
+        let symbols: Vec<RawGlyph> = serde_json::from_str(SYMBOLS_RAW).unwrap_or_default();
+
+        Self {
+            emojis,
+            kaomojis,
+            symbols,
+        }
+    }
+
+    pub fn emoji_count(&self) -> usize {
+        self.emojis.len()
+    }
+
+    pub fn kaomoji_count(&self) -> usize {
+        self.kaomojis.len()
+    }
+
+    pub fn symbol_count(&self) -> usize {
+        self.symbols.len()
+    }
+
+    pub fn search(&self, query: &str, limit: usize) -> Vec<RawGlyph> {
+        let q = query.to_lowercase();
+        let mut results = Vec::new();
+
+        // Search emojis
+        for e in &self.emojis {
+            if e.name.contains(&q) || e.keywords.contains(&q) {
+                results.push(e.clone());
+                if results.len() >= limit {
+                    return results;
+                }
+            }
+        }
+
+        // Search kaomojis
+        for k in &self.kaomojis {
+            if k.name.contains(&q) || k.keywords.contains(&q) || k.char.contains(&q) {
+                results.push(k.clone());
+                if results.len() >= limit {
+                    return results;
+                }
+            }
+        }
+
+        // Search symbols
+        for s in &self.symbols {
+            if s.name.contains(&q) || s.keywords.contains(&q) {
+                results.push(s.clone());
+                if results.len() >= limit {
+                    return results;
+                }
+            }
+        }
+
+        results
+    }
 }
-
-pub const SAMPLE_EMOJIS: &[EmojiEntry] = &[
-    EmojiEntry { char: "😀", name: "grinning face", category: "smileys", keywords: &["happy", "smile"] },
-    EmojiEntry { char: "🚀", name: "rocket", category: "travel", keywords: &["space", "launch", "fast"] },
-    EmojiEntry { char: "🦀", name: "crab", category: "animals", keywords: &["rust", "ferris", "crustacean"] },
-    EmojiEntry { char: "⚡", name: "high voltage", category: "objects", keywords: &["zap", "lightning", "fast"] },
-];
-
-pub const SAMPLE_KAOMOJI: &[KaomojiEntry] = &[
-    KaomojiEntry { text: r#"¯\_(ツ)_/¯"#, category: "shrug", description: "shrug" },
-    KaomojiEntry { text: "( ͡° ͜ʖ ͡°)", category: "lenny", description: "lenny face" },
-    KaomojiEntry { text: "(╯°□°)╯︵ ┻━┻", category: "angry", description: "table flip" },
-    KaomojiEntry { text: "┬─┬ノ( º _ ºノ)", category: "neutral", description: "put table back" },
-];
-
-pub const SAMPLE_SYMBOLS: &[SymbolEntry] = &[
-    SymbolEntry { char: "→", name: "rightwards arrow", category: "arrows" },
-    SymbolEntry { char: "✓", name: "check mark", category: "symbols" },
-    SymbolEntry { char: "€", name: "euro sign", category: "currency" },
-    SymbolEntry { char: "∑", name: "n-ary summation", category: "math" },
-    SymbolEntry { char: "λ", name: "greek small letter lambda", category: "greek" },
-];

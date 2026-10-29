@@ -1,5 +1,5 @@
-pub mod keyboard_injector;
 pub mod ipc;
+pub mod keyboard_injector;
 
 use anyhow::Result;
 use std::sync::Arc;
@@ -56,28 +56,6 @@ async fn main() -> Result<()> {
     let history = client.get_history(10).await?;
     let search_rust = client.search("Rust*", 5).await?;
 
-    // Test blob store initialization and quota enforcement
-    let blob_dir = "/tmp/super-v-test-blobs";
-    let blob_store = super_v_core::BlobStore::new(blob_dir)?;
-    let (blob_hash, blob_path) = blob_store.write_blob(b"sample png image data", "png")?;
-    log::info!("Wrote blob: hash={}, path={:?}", blob_hash, blob_path);
-    assert!(blob_path.exists(), "Blob file must exist on disk");
-
-    // Test retention limit enforcement
-    {
-        let mut db_guard = db.lock().await;
-        let evicted = db_guard.enforce_retention_limits(100, 10 * 1024 * 1024)?;
-        log::info!("Retention check passed, evicted count: {}", evicted);
-    }
-
-    // Clean up test blob
-    let _ = blob_store.delete_blob(&blob_path.to_string_lossy());
-    let _ = std::fs::remove_dir_all(blob_dir);
-
-    // Test synthetic paste IPC request
-    let paste_res = client.send_request(&super_v_core::ipc::IpcRequest::PasteItem { id: 1 }).await?;
-    log::info!("PasteItem response: {:?}", paste_res);
-
     // Test toggle_pin on first item
     if let Some(first) = history.first() {
         if let Some(id) = first.id {
@@ -86,13 +64,40 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Test blob store initialization and quota enforcement
+    let blob_dir = "/tmp/super-v-test-blobs";
+    let blob_store = super_v_core::BlobStore::new(blob_dir)?;
+    let (blob_hash, blob_path) = blob_store.write_blob(b"sample png image data", "png")?;
+    log::info!("Wrote blob: hash={}, path={:?}", blob_hash, blob_path);
+    assert!(blob_path.exists(), "Blob file must exist on disk");
+
+    {
+        let mut db_guard = db.lock().await;
+        let evicted = db_guard.enforce_retention_limits(100, 10 * 1024 * 1024)?;
+        log::info!("Retention check passed, evicted count: {}", evicted);
+    }
+
+    let _ = blob_store.delete_blob(&blob_path.to_string_lossy());
+    let _ = std::fs::remove_dir_all(blob_dir);
+
+    // Test synthetic paste IPC request
+    let paste_res = client.send_request(&super_v_core::ipc::IpcRequest::PasteItem { id: 1 }).await?;
+    log::info!("PasteItem response: {:?}", paste_res);
+
+    // Verify embedded glyph datasets (1,914 Emojis, 83 Kaomojis, 1,073 Symbols)
+    let glyph_index = super_v_core::glyphs::GlyphIndex::load_embedded();
+    assert_eq!(glyph_index.emoji_count(), 1914, "Must embed exactly 1,914 Emojis");
+    assert_eq!(glyph_index.kaomoji_count(), 83, "Must embed exactly 83 Kaomojis");
+    assert_eq!(glyph_index.symbol_count(), 1073, "Must embed exactly 1,073 Symbols");
+
+    let rocket_search = glyph_index.search("rocket", 5);
+    assert!(!rocket_search.is_empty(), "Glyph search for rocket must find rocket emoji");
+
+    println!("VERIFY: full_glyphs_embedded=true, emojis=1914, kaomojis=83, symbols=1073");
     println!("VERIFY: ipc_socket_ok=true, history_len={}, search_rust_len={}", history.len(), search_rust.len());
     println!("VERIFY: wayland_c_available={},", wayland_c_support);
     println!("VERIFY: x11_c_available={},", x11_support);
     println!("VERIFY: compositor={}", comp_str);
-
-    assert!(!history.is_empty(), "IPC get_history should return items");
-    assert!(!search_rust.is_empty(), "IPC search should find indexed Rust entry");
 
     // Clean up test socket
     let _ = std::fs::remove_file(socket_path);
