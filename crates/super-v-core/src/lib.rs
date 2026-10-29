@@ -6,6 +6,7 @@ pub mod classifier;
 pub mod glyphs;
 pub mod ipc;
 pub mod ipc_client;
+pub mod secret_filter;
 
 use anyhow::Result;
 use rusqlite::{params, Connection};
@@ -14,6 +15,7 @@ use std::path::Path;
 
 pub use blob_store::BlobStore;
 pub use classifier::ContentCategory;
+pub use secret_filter::SecretFilter;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ClipboardItem {
@@ -24,6 +26,7 @@ pub struct ClipboardItem {
     pub category: ContentCategory,
     pub blob_path: Option<String>,
     pub is_pinned: bool,
+    pub is_sensitive: bool,
     pub byte_size: usize,
     pub created_at: i64,
 }
@@ -52,6 +55,7 @@ impl Database {
                  category TEXT NOT NULL DEFAULT 'text',
                  blob_path TEXT,
                  is_pinned BOOLEAN NOT NULL DEFAULT 0,
+                 is_sensitive BOOLEAN NOT NULL DEFAULT 0,
                  byte_size INTEGER NOT NULL,
                  created_at INTEGER NOT NULL
              );
@@ -78,6 +82,7 @@ impl Database {
         )?;
 
         let _ = conn.execute("ALTER TABLE entries ADD COLUMN category TEXT NOT NULL DEFAULT 'text'", []);
+        let _ = conn.execute("ALTER TABLE entries ADD COLUMN is_sensitive BOOLEAN NOT NULL DEFAULT 0", []);
 
         Ok(Self { conn })
     }
@@ -91,12 +96,13 @@ impl Database {
             .as_secs() as i64;
 
         let category = ContentCategory::classify(mime, text);
+        let is_sensitive = SecretFilter::is_sensitive(mime, text);
 
         self.conn.execute(
-            "INSERT INTO entries (hash, mime, text, category, byte_size, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(hash) DO UPDATE SET created_at = excluded.created_at, category = excluded.category",
-            params![hash, mime, text, category.as_str(), data.len(), now],
+            "INSERT INTO entries (hash, mime, text, category, is_sensitive, byte_size, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(hash) DO UPDATE SET created_at = excluded.created_at, category = excluded.category, is_sensitive = excluded.is_sensitive",
+            params![hash, mime, text, category.as_str(), is_sensitive, data.len(), now],
         )?;
 
         let id = self.conn.last_insert_rowid();
@@ -109,6 +115,7 @@ impl Database {
             category,
             blob_path: None,
             is_pinned: false,
+            is_sensitive,
             byte_size: data.len(),
             created_at: now,
         })
@@ -194,25 +201,25 @@ impl Database {
     pub fn list_ordered(&self, limit: usize, sort: SortOrder) -> Result<Vec<ClipboardItem>> {
         let query = match sort {
             SortOrder::Recent => {
-                "SELECT id, hash, mime, text, category, blob_path, is_pinned, byte_size, created_at
+                "SELECT id, hash, mime, text, category, blob_path, is_pinned, is_sensitive, byte_size, created_at
                  FROM entries
                  ORDER BY created_at DESC
                  LIMIT ?1"
             }
             SortOrder::PinnedFirst => {
-                "SELECT id, hash, mime, text, category, blob_path, is_pinned, byte_size, created_at
+                "SELECT id, hash, mime, text, category, blob_path, is_pinned, is_sensitive, byte_size, created_at
                  FROM entries
                  ORDER BY is_pinned DESC, created_at DESC
                  LIMIT ?1"
             }
             SortOrder::Alphabetical => {
-                "SELECT id, hash, mime, text, category, blob_path, is_pinned, byte_size, created_at
+                "SELECT id, hash, mime, text, category, blob_path, is_pinned, is_sensitive, byte_size, created_at
                  FROM entries
                  ORDER BY text ASC
                  LIMIT ?1"
             }
             SortOrder::SizeDesc => {
-                "SELECT id, hash, mime, text, category, blob_path, is_pinned, byte_size, created_at
+                "SELECT id, hash, mime, text, category, blob_path, is_pinned, is_sensitive, byte_size, created_at
                  FROM entries
                  ORDER BY byte_size DESC
                  LIMIT ?1"
@@ -239,8 +246,9 @@ impl Database {
                 category,
                 blob_path: row.get(5)?,
                 is_pinned: row.get(6)?,
-                byte_size: row.get(7)?,
-                created_at: row.get(8)?,
+                is_sensitive: row.get(7)?,
+                byte_size: row.get(8)?,
+                created_at: row.get(9)?,
             })
         })?;
 
@@ -253,7 +261,7 @@ impl Database {
 
     pub fn list_by_category(&self, limit: usize, category: ContentCategory) -> Result<Vec<ClipboardItem>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, hash, mime, text, category, blob_path, is_pinned, byte_size, created_at
+            "SELECT id, hash, mime, text, category, blob_path, is_pinned, is_sensitive, byte_size, created_at
              FROM entries
              WHERE category = ?1
              ORDER BY is_pinned DESC, created_at DESC
@@ -268,8 +276,9 @@ impl Database {
                 category,
                 blob_path: row.get(5)?,
                 is_pinned: row.get(6)?,
-                byte_size: row.get(7)?,
-                created_at: row.get(8)?,
+                is_sensitive: row.get(7)?,
+                byte_size: row.get(8)?,
+                created_at: row.get(9)?,
             })
         })?;
 
@@ -286,7 +295,7 @@ impl Database {
 
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<ClipboardItem>> {
         let mut stmt = self.conn.prepare(
-            "SELECT e.id, e.hash, e.mime, e.text, e.category, e.blob_path, e.is_pinned, e.byte_size, e.created_at
+            "SELECT e.id, e.hash, e.mime, e.text, e.category, e.blob_path, e.is_pinned, e.is_sensitive, e.byte_size, e.created_at
              FROM entries e
              JOIN entries_fts fts ON e.id = fts.rowid
              WHERE entries_fts MATCH ?1
@@ -312,8 +321,9 @@ impl Database {
                 category,
                 blob_path: row.get(5)?,
                 is_pinned: row.get(6)?,
-                byte_size: row.get(7)?,
-                created_at: row.get(8)?,
+                is_sensitive: row.get(7)?,
+                byte_size: row.get(8)?,
+                created_at: row.get(9)?,
             })
         })?;
 

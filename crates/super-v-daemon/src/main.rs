@@ -32,7 +32,11 @@ async fn main() -> Result<()> {
 
     let db_path = std::env::var("SUPER_V_DB").unwrap_or_else(|_| ":memory:".to_string());
     let mut db_init = Database::open(&db_path)?;
-    db_init.insert_or_touch("text/plain", b"Important API token 12345", Some("Important API token 12345"))?;
+    
+    // Seed and verify SecretFilter
+    let token_item = db_init.insert_or_touch("text/plain", b"ghp_1234567890abcdefghijklmnopqrstuvwxyz", Some("ghp_1234567890abcdefghijklmnopqrstuvwxyz"))?;
+    assert!(token_item.is_sensitive, "GitHub token must be classified as sensitive");
+
     db_init.insert_or_touch("text/plain", b"#308b53", Some("#308b53"))?;
     db_init.insert_or_touch("text/plain", b"https://github.com/GNOME/gnome-shell", Some("https://github.com/GNOME/gnome-shell"))?;
     db_init.insert_or_touch("text/plain", b"Rust programming language", Some("Rust programming language"))?;
@@ -94,6 +98,7 @@ async fn main() -> Result<()> {
     assert!(!rocket_search.is_empty(), "Glyph search for rocket must find rocket emoji");
 
     println!("VERIFY: full_glyphs_embedded=true, emojis=1914, kaomojis=83, symbols=1073");
+    println!("VERIFY: secret_filter_verified=true, token_masked={}", super_v_core::SecretFilter::mask_preview("ghp_1234567890abcdefghijklmnopqrstuvwxyz"));
     println!("VERIFY: ipc_socket_ok=true, history_len={}, search_rust_len={}", history.len(), search_rust.len());
     println!("VERIFY: wayland_c_available={},", wayland_c_support);
     println!("VERIFY: x11_c_available={},", x11_support);
