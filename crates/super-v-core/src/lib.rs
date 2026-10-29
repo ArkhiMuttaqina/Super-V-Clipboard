@@ -1,6 +1,7 @@
 //! Core data models, SQLite storage, and deduplication engine for super-v-clipboard.
 
 pub mod backend;
+pub mod blob_store;
 pub mod classifier;
 pub mod glyphs;
 pub mod ipc;
@@ -11,6 +12,7 @@ use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
+pub use blob_store::BlobStore;
 pub use classifier::ContentCategory;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -75,7 +77,6 @@ impl Database {
              END;",
         )?;
 
-        // Safe migration if category column is missing on existing tables
         let _ = conn.execute("ALTER TABLE entries ADD COLUMN category TEXT NOT NULL DEFAULT 'text'", []);
 
         Ok(Self { conn })
@@ -131,6 +132,63 @@ impl Database {
     pub fn clear_unpinned(&mut self) -> Result<usize> {
         let count = self.conn.execute("DELETE FROM entries WHERE is_pinned = 0", [])?;
         Ok(count)
+    }
+
+    pub fn enforce_retention_limits(&mut self, max_unpinned_count: usize, max_total_bytes: usize) -> Result<usize> {
+        let current_count: usize = self.conn.query_row(
+            "SELECT COUNT(*) FROM entries WHERE is_pinned = 0",
+            [],
+            |r| r.get(0),
+        )?;
+
+        let mut evicted = 0;
+        if current_count > max_unpinned_count {
+            let excess = current_count - max_unpinned_count;
+            let ids_to_delete: Vec<(i64, Option<String>)> = {
+                let mut stmt = self.conn.prepare(
+                    "SELECT id, blob_path FROM entries WHERE is_pinned = 0 ORDER BY created_at ASC LIMIT ?1",
+                )?;
+                let rows = stmt.query_map([excess], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                rows.filter_map(|res| res.ok()).collect()
+            };
+
+            for (id, blob_path) in ids_to_delete {
+                if let Some(path) = blob_path {
+                    let _ = std::fs::remove_file(path);
+                }
+                self.conn.execute("DELETE FROM entries WHERE id = ?1", params![id])?;
+                evicted += 1;
+            }
+        }
+
+        let mut total_bytes: usize = self.conn.query_row(
+            "SELECT COALESCE(SUM(byte_size), 0) FROM entries WHERE is_pinned = 0",
+            [],
+            |r| r.get(0),
+        )?;
+
+        while total_bytes > max_total_bytes {
+            let oldest: Option<(i64, usize, Option<String>)> = {
+                let mut stmt = self.conn.prepare(
+                    "SELECT id, byte_size, blob_path FROM entries WHERE is_pinned = 0 ORDER BY created_at ASC LIMIT 1",
+                )?;
+                stmt.query_row([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).ok()
+            };
+
+            match oldest {
+                Some((id, size, blob_path)) => {
+                    if let Some(path) = blob_path {
+                        let _ = std::fs::remove_file(path);
+                    }
+                    self.conn.execute("DELETE FROM entries WHERE id = ?1", params![id])?;
+                    total_bytes = total_bytes.saturating_sub(size);
+                    evicted += 1;
+                }
+                None => break,
+            }
+        }
+
+        Ok(evicted)
     }
 
     pub fn list_ordered(&self, limit: usize, sort: SortOrder) -> Result<Vec<ClipboardItem>> {

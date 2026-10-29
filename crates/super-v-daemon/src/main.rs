@@ -55,6 +55,24 @@ async fn main() -> Result<()> {
     let history = client.get_history(10).await?;
     let search_rust = client.search("Rust*", 5).await?;
 
+    // Test blob store initialization and quota enforcement
+    let blob_dir = "/tmp/super-v-test-blobs";
+    let blob_store = super_v_core::BlobStore::new(blob_dir)?;
+    let (blob_hash, blob_path) = blob_store.write_blob(b"sample png image data", "png")?;
+    log::info!("Wrote blob: hash={}, path={:?}", blob_hash, blob_path);
+    assert!(blob_path.exists(), "Blob file must exist on disk");
+
+    // Test retention limit enforcement
+    {
+        let mut db_guard = db.lock().await;
+        let evicted = db_guard.enforce_retention_limits(100, 10 * 1024 * 1024)?;
+        log::info!("Retention check passed, evicted count: {}", evicted);
+    }
+
+    // Clean up test blob
+    let _ = blob_store.delete_blob(&blob_path.to_string_lossy());
+    let _ = std::fs::remove_dir_all(blob_dir);
+
     // Test toggle_pin on first item
     if let Some(first) = history.first() {
         if let Some(id) = first.id {
