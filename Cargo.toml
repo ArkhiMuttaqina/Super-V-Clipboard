@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/super-v-core",
+    "crates/super-v-daemon",
+    "crates/super-v-ui",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Arkhi Muttaqina <arkhims@users.noreply.github.com>"]
+license = "GPL-3.0-or-later"
+
+[workspace.dependencies]
+tokio = { version = "1.40", features = ["full"] }
+rusqlite = { version = "0.32", features = ["bundled", "bundled-full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+log = "0.4"
+env_logger = "0.11"
+anyhow = "1.0"
+thiserror = "1.0"
