@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 super-v-core = { path = "../super-v-core" }
 super-v-backend-x11 = { path = "../super-v-backend-x11" }
+super-v-backend-wlr = { path = "../super-v-backend-wlr" }
 tokio = { workspace = true, features = ["full"] }
 serde.workspace = true
 serde_json.workspace = true

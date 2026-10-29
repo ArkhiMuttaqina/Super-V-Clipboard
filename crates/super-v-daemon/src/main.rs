@@ -23,6 +23,9 @@ async fn main() -> Result<()> {
     };
     log::info!("Detected compositor environment: {}", comp_str);
 
+    let wayland_c_support = super_v_backend_wlr::WlrBackend::is_available();
+    log::info!("Native C Wayland client availability: {}", wayland_c_support);
+
     let x11_support = super_v_backend_x11::X11Backend::new().is_ok();
     log::info!("Native C X11 XTest availability: {}", x11_support);
 
@@ -51,6 +54,7 @@ async fn main() -> Result<()> {
     let search_rust = client.search("Rust*", 5).await?;
 
     println!("VERIFY: ipc_socket_ok=true, history_len={}, search_rust_len={}", history.len(), search_rust.len());
+    println!("VERIFY: wayland_c_available={},", wayland_c_support);
     println!("VERIFY: x11_c_available={},", x11_support);
     println!("VERIFY: compositor={}", comp_str);
 
