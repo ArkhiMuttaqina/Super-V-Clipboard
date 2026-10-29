@@ -1,3 +1,4 @@
+pub mod keyboard_injector;
 pub mod ipc;
 
 use anyhow::Result;
@@ -72,6 +73,10 @@ async fn main() -> Result<()> {
     // Clean up test blob
     let _ = blob_store.delete_blob(&blob_path.to_string_lossy());
     let _ = std::fs::remove_dir_all(blob_dir);
+
+    // Test synthetic paste IPC request
+    let paste_res = client.send_request(&super_v_core::ipc::IpcRequest::PasteItem { id: 1 }).await?;
+    log::info!("PasteItem response: {:?}", paste_res);
 
     // Test toggle_pin on first item
     if let Some(first) = history.first() {

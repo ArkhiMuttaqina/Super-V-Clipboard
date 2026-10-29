@@ -9,10 +9,12 @@ use tokio::sync::Mutex;
 
 use super_v_core::ipc::{IpcRequest, IpcResponse};
 use super_v_core::Database;
+use crate::keyboard_injector::KeyboardInjector;
 
 pub struct IpcServer {
     socket_path: PathBuf,
     db: Arc<Mutex<Database>>,
+    injector: Arc<KeyboardInjector>,
 }
 
 impl IpcServer {
@@ -20,6 +22,7 @@ impl IpcServer {
         Self {
             socket_path: socket_path.as_ref().to_path_buf(),
             db,
+            injector: Arc::new(KeyboardInjector::new()),
         }
     }
 
@@ -35,8 +38,9 @@ impl IpcServer {
             match listener.accept().await {
                 Ok((stream, _addr)) => {
                     let db = Arc::clone(&self.db);
+                    let injector = Arc::clone(&self.injector);
                     tokio::spawn(async move {
-                        if let Err(e) = Self::handle_client(stream, db).await {
+                        if let Err(e) = Self::handle_client(stream, db, injector).await {
                             log::warn!("IPC client error: {:?}", e);
                         }
                     });
@@ -50,7 +54,11 @@ impl IpcServer {
         Ok(())
     }
 
-    async fn handle_client(stream: UnixStream, db: Arc<Mutex<Database>>) -> Result<()> {
+    async fn handle_client(
+        stream: UnixStream,
+        db: Arc<Mutex<Database>>,
+        injector: Arc<KeyboardInjector>,
+    ) -> Result<()> {
         let (reader, mut writer) = stream.into_split();
         let mut lines = BufReader::new(reader).lines();
 
@@ -95,8 +103,15 @@ impl IpcServer {
                         Err(e) => IpcResponse::Error(e.to_string()),
                     }
                 }
-                Ok(IpcRequest::PasteItem { id: _ }) => {
-                    IpcResponse::Ack
+                Ok(IpcRequest::PasteItem { id }) => {
+                    // Trigger synthetic paste
+                    match injector.paste() {
+                        Ok(_) => {
+                            log::info!("Paste triggered for item id={}", id);
+                            IpcResponse::Ack
+                        }
+                        Err(e) => IpcResponse::Error(format!("Paste injection failed: {}", e)),
+                    }
                 }
                 Err(e) => IpcResponse::Error(format!("Malformed request: {}", e)),
             };
