@@ -6,6 +6,7 @@
 
 static GtkWidget *g_main_window = NULL;
 static GtkWidget *g_clip_list = NULL;
+static GtkWidget *g_search_entry = NULL;
 static PasteCallback g_paste_cb = NULL;
 
 void super_v_ui_set_paste_callback(PasteCallback cb) {
@@ -31,6 +32,32 @@ static void on_row_activated(GtkListBox *box, GtkListBoxRow *row, gpointer user_
     if (g_main_window) {
         gtk_window_close(GTK_WINDOW(g_main_window));
     }
+}
+
+static gboolean clip_list_filter_func(GtkListBoxRow *row, gpointer user_data) {
+    GtkSearchEntry *entry = GTK_SEARCH_ENTRY(user_data);
+    const char *query = gtk_editable_get_text(GTK_EDITABLE(entry));
+    if (!query || strlen(query) == 0) {
+        return TRUE;
+    }
+
+    const char *title = (const char*)g_object_get_data(G_OBJECT(row), "super_v_text");
+    if (!title) {
+        return FALSE;
+    }
+
+    gchar *title_lower = g_utf8_strdown(title, -1);
+    gchar *query_lower = g_utf8_strdown(query, -1);
+    gboolean match = (strstr(title_lower, query_lower) != NULL);
+    g_free(title_lower);
+    g_free(query_lower);
+    return match;
+}
+
+static void on_search_changed(GtkSearchEntry *entry, gpointer user_data) {
+    (void)entry;
+    GtkListBox *list = GTK_LIST_BOX(user_data);
+    gtk_list_box_invalidate_filter(list);
 }
 
 void super_v_ui_show_settings(void *parent_window) {
@@ -171,12 +198,12 @@ static GtkWidget* create_main_window(AdwApplication *app) {
     gtk_box_append(GTK_BOX(box), header);
 
     // Search bar
-    GtkWidget *search_entry = gtk_search_entry_new();
-    gtk_widget_set_margin_start(search_entry, 12);
-    gtk_widget_set_margin_end(search_entry, 12);
-    gtk_widget_set_margin_top(search_entry, 8);
-    gtk_widget_set_margin_bottom(search_entry, 8);
-    gtk_box_append(GTK_BOX(box), search_entry);
+    g_search_entry = gtk_search_entry_new();
+    gtk_widget_set_margin_start(g_search_entry, 12);
+    gtk_widget_set_margin_end(g_search_entry, 12);
+    gtk_widget_set_margin_top(g_search_entry, 8);
+    gtk_widget_set_margin_bottom(g_search_entry, 8);
+    gtk_box_append(GTK_BOX(box), g_search_entry);
 
     // Tab Stack
     AdwViewStack *stack = ADW_VIEW_STACK(adw_view_stack_new());
@@ -192,6 +219,10 @@ static GtkWidget* create_main_window(AdwApplication *app) {
     gtk_widget_set_margin_end(g_clip_list, 12);
     gtk_widget_set_margin_top(g_clip_list, 6);
     gtk_widget_set_margin_bottom(g_clip_list, 6);
+
+    // Wire live search filter func
+    gtk_list_box_set_filter_func(GTK_LIST_BOX(g_clip_list), clip_list_filter_func, g_search_entry, NULL);
+    g_signal_connect(g_search_entry, "search-changed", G_CALLBACK(on_search_changed), g_clip_list);
 
     // Connect row-activated event for instant paste & auto-close
     g_signal_connect(g_clip_list, "row-activated", G_CALLBACK(on_row_activated), NULL);
