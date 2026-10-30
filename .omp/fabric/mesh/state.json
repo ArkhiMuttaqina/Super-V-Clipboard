@@ -29,11 +29,11 @@
           "sessionId": "01a189bc-cacd-72da-bef2-d097c7671de7"
         },
         "startedAt": 1793312703437,
-        "updatedAt": 1793313213880,
-        "expiresAt": 1793313228880
+        "updatedAt": 1793323339208,
+        "expiresAt": 1793323354208
       },
-      "version": 169,
-      "updatedAt": 1793313213882,
+      "version": 2638,
+      "updatedAt": 1793323339209,
       "updatedBy": {
         "id": "session:01a189bc-cacd-72da-bef2-d097c7671de7",
         "name": "main",
@@ -55,12 +55,12 @@
         "sessionId": "01a189bc-cacd-72da-bef2-d097c7671de7",
         "model": "zen-arkhi/antigravity/gemini-3.8-flash-tiered",
         "startedAt": 1793312703436,
-        "updatedAt": 1793313213880,
+        "updatedAt": 1793323339208,
         "pendingMessages": false,
         "local": false
       },
-      "version": 169,
-      "updatedAt": 1793313213883,
+      "version": 2638,
+      "updatedAt": 1793323339211,
       "updatedBy": {
         "id": "session:01a189bc-cacd-72da-bef2-d097c7671de7",
         "name": "main",
@@ -90,13 +90,13 @@
         "sessionId": "01a189bc-cacd-72da-bef2-d097c7671de7",
         "model": "zen-arkhi/antigravity/gemini-3.8-flash-tiered",
         "startedAt": 1793312703436,
-        "updatedAt": 1793313213880,
+        "updatedAt": 1793323339208,
         "pendingMessages": false,
         "controlProtocol": "v1",
         "label": "SVC-1"
       },
-      "version": 169,
-      "updatedAt": 1793313213891,
+      "version": 2638,
+      "updatedAt": 1793323339213,
       "updatedBy": {
         "id": "session:01a189bc-cacd-72da-bef2-d097c7671de7",
         "name": "main",
@@ -107,9 +107,9 @@
   },
   "versions": {
     "topology/peer-seq": 1,
-    "topology/hosts/e14380798fd0180bc90e877f95941d5a123f482af771a37d0bc999366b4a6e44": 169,
-    "sessions/01a189bc-cacd-72da-bef2-d097c7671de7": 169,
-    "topology/participants/e14380798fd0180bc90e877f95941d5a123f482af771a37d0bc999366b4a6e44": 169
+    "topology/hosts/e14380798fd0180bc90e877f95941d5a123f482af771a37d0bc999366b4a6e44": 2638,
+    "sessions/01a189bc-cacd-72da-bef2-d097c7671de7": 2638,
+    "topology/participants/e14380798fd0180bc90e877f95941d5a123f482af771a37d0bc999366b4a6e44": 2638
   },
   "tombstoneOrder": []
 }

@@ -3,7 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-./target/debug/super-v-daemon
+./target/debug/super-v-daemon --test
 ./target/debug/super-v-ui --test
 ./target/debug/bench_db
 ./target/debug/bench_stress

@@ -13,8 +13,8 @@ build:
 	strip target/release/super-v-ui
 
 install: build
-	mkdir -p $(HOME)/.local/share/gnome-shell/extensions/super-v-bridge@darulfalah.org
-	cp -r data/gnome-extension/* $(HOME)/.local/share/gnome-shell/extensions/super-v-bridge@darulfalah.org/
+	mkdir -p $(HOME)/.local/share/gnome-shell/extensions/super-v-bridge@arkhimuttaqina.my.id
+	cp -r data/gnome-extension/* $(HOME)/.local/share/gnome-shell/extensions/super-v-bridge@arkhimuttaqina.my.id/
 	mkdir -p $(BINDIR)
 	install -m 755 target/release/super-v-daemon $(BINDIR)/super-v-daemon
 	install -m 755 target/release/super-v-ui $(BINDIR)/super-v-ui

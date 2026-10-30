@@ -49,9 +49,9 @@ pub trait ClipboardBackend: Send + Sync {
 pub struct GnomeBridgeSpec;
 
 impl GnomeBridgeSpec {
-    pub const DBUS_NAME: &'static str = "org.darulfalah.SuperVBridge";
-    pub const DBUS_PATH: &'static str = "/org/darulfalah/SuperVBridge";
-    pub const EXTENSION_UUID: &'static str = "super-v-bridge@darulfalah.org";
+    pub const DBUS_NAME: &'static str = "my.id.arkhimuttaqina.SuperVBridge";
+    pub const DBUS_PATH: &'static str = "/org/arkhimuttaqina/SuperVBridge";
+    pub const EXTENSION_UUID: &'static str = "super-v-bridge@arkhimuttaqina.my.id";
 
     pub fn is_installed() -> bool {
         if let Ok(home) = std::env::var("HOME") {
@@ -71,9 +71,9 @@ pub struct HyprlandHelper;
 impl HyprlandHelper {
     pub const HYPRLAND_RULES: &'static str = r#"
 # Super-V Clipboard Window Rules
-windowrulev2 = float, class:(org.darulfalah.SuperVClipboard)
-windowrulev2 = center, class:(org.darulfalah.SuperVClipboard)
-windowrulev2 = stayfocused, class:(org.darulfalah.SuperVClipboard)
+windowrulev2 = float, class:(my.id.arkhimuttaqina.SuperVClipboard)
+windowrulev2 = center, class:(my.id.arkhimuttaqina.SuperVClipboard)
+windowrulev2 = stayfocused, class:(my.id.arkhimuttaqina.SuperVClipboard)
 bind = SUPER, V, exec, super-v-ui
 "#;
 

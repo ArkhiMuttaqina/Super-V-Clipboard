@@ -1,3 +1,4 @@
+pub mod clipboard_poller;
 pub mod ipc;
 pub mod keyboard_injector;
 
@@ -9,11 +10,15 @@ use super_v_core::{
     ipc_client::IpcClient,
     Database,
 };
+use crate::clipboard_poller::ClipboardPoller;
 use crate::ipc::server::IpcServer;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::init();
+
+    let args: Vec<String> = std::env::args().collect();
+    let is_test_run = args.iter().any(|a| a == "--test");
 
     let comp = CompositorType::detect();
     let comp_str = match comp {
@@ -30,7 +35,18 @@ async fn main() -> Result<()> {
     let x11_support = super_v_backend_x11::X11Backend::new().is_ok();
     log::info!("Native C X11 XTest availability: {}", x11_support);
 
-    let db_path = std::env::var("SUPER_V_DB").unwrap_or_else(|_| ":memory:".to_string());
+    // Default persistent user database path
+    let db_path = if is_test_run {
+        ":memory:".to_string()
+    } else {
+        std::env::var("SUPER_V_DB").unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            let dir = format!("{}/.local/share/super-v-clipboard", home);
+            let _ = std::fs::create_dir_all(&dir);
+            format!("{}/clipboard.db", dir)
+        })
+    };
+
     let mut db_init = Database::open(&db_path)?;
 
     // Seed and verify SecretFilter
@@ -53,10 +69,28 @@ async fn main() -> Result<()> {
 
     let db = Arc::new(Mutex::new(db_init));
 
-    // Spawn IPC Server in background
-    let socket_path = "/tmp/super-v-test.sock";
-    let server = IpcServer::new(socket_path, Arc::clone(&db));
-    tokio::spawn(async move {
+    // Initialize BlobStore for screenshots and files
+    let blob_dir = if is_test_run {
+        "/tmp/super-v-test-blobs".to_string()
+    } else {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        format!("{}/.local/share/super-v-clipboard/blobs", home)
+    };
+    let blob_store = Arc::new(super_v_core::BlobStore::new(&blob_dir)?);
+
+    // Start background real-time clipboard poller
+    let poller = Arc::new(ClipboardPoller::new(Arc::clone(&db), Arc::clone(&blob_store)));
+    poller.start_polling();
+
+    // Standard IPC socket path
+    let socket_path = if is_test_run {
+        "/tmp/super-v-test.sock".to_string()
+    } else {
+        "/tmp/super-v-clipboard.sock".to_string()
+    };
+
+    let server = IpcServer::new(&socket_path, Arc::clone(&db));
+    let server_handle = tokio::spawn(async move {
         if let Err(e) = server.run().await {
             log::error!("IPC server runtime failure: {:?}", e);
         }
@@ -66,7 +100,7 @@ async fn main() -> Result<()> {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     // Test client IPC round-trip
-    let mut client = IpcClient::connect(socket_path).await?;
+    let mut client = IpcClient::connect(&socket_path).await?;
     let history = client.get_history(10).await?;
     let search_rust = client.search("Rust*", 5).await?;
 
@@ -78,12 +112,10 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Test blob store initialization and quota enforcement
-    let blob_dir = "/tmp/super-v-test-blobs";
-    let blob_store = super_v_core::BlobStore::new(blob_dir)?;
-    let (blob_hash, blob_path) = blob_store.write_blob(b"sample png image data", "png")?;
-    log::info!("Wrote blob: hash={}, path={:?}", blob_hash, blob_path);
-    assert!(blob_path.exists(), "Blob file must exist on disk");
+    // Test blob store write
+    let (blob_hash, blob_file) = blob_store.write_blob(b"sample png image data", "png")?;
+    log::info!("Wrote blob: hash={}, path={:?}", blob_hash, blob_file);
+    assert!(blob_file.exists(), "Blob file must exist on disk");
 
     {
         let mut db_guard = db.lock().await;
@@ -91,8 +123,10 @@ async fn main() -> Result<()> {
         log::info!("Retention check passed, evicted count: {}", evicted);
     }
 
-    let _ = blob_store.delete_blob(&blob_path.to_string_lossy());
-    let _ = std::fs::remove_dir_all(blob_dir);
+    if is_test_run {
+        let _ = blob_store.delete_blob(&blob_file.to_string_lossy());
+        let _ = std::fs::remove_dir_all(&blob_dir);
+    }
 
     // Test synthetic paste IPC request
     let paste_res = client.send_request(&super_v_core::ipc::IpcRequest::PasteItem { id: 1 }).await?;
@@ -143,7 +177,13 @@ async fn main() -> Result<()> {
     println!("VERIFY: x11_c_available={},", x11_support);
     println!("VERIFY: compositor={}", comp_str);
 
-    // Clean up test socket
-    let _ = std::fs::remove_file(socket_path);
+    if is_test_run {
+        let _ = std::fs::remove_file(socket_path);
+        return Ok(());
+    }
+
+    // In normal execution mode, keep the daemon running forever!
+    log::info!("Super-V Daemon is now actively running in background on {:?}", socket_path);
+    server_handle.await?;
     Ok(())
 }

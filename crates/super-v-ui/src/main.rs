@@ -2,16 +2,36 @@ use anyhow::Result;
 use std::env;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
+use super_v_core::glyphs::GlyphIndex;
 
 type PasteCallback = extern "C" fn(id: libc::c_longlong, text: *const c_char);
+type PinCallback = extern "C" fn(id: libc::c_longlong);
+type DeleteCallback = extern "C" fn(id: libc::c_longlong);
 
 #[allow(dead_code)]
 extern "C" {
     fn super_v_ui_set_paste_callback(cb: PasteCallback);
+    fn super_v_ui_set_pin_callback(cb: PinCallback);
+    fn super_v_ui_set_delete_callback(cb: DeleteCallback);
     fn super_v_ui_run_app(argc: c_int, argv: *mut *mut c_char) -> c_int;
     fn super_v_ui_test_prewarm(version_buf: *mut c_char, max_len: c_int) -> c_int;
-    fn super_v_ui_add_history_item(title: *const c_char, subtitle: *const c_char, is_pinned: c_int, is_sensitive: c_int, id: libc::c_longlong);
+    fn super_v_ui_add_history_item(
+        title: *const c_char,
+        subtitle: *const c_char,
+        is_pinned: c_int,
+        is_sensitive: c_int,
+        id: libc::c_longlong,
+        preview_image_path: *const c_char,
+    );
     fn super_v_ui_clear_history_items();
+    fn super_v_ui_add_glyph_item(
+        tab: *const c_char,
+        glyph: *const c_char,
+        name: *const c_char,
+        keywords: *const c_char,
+        skin_tone_capable: c_int,
+    );
+    fn super_v_ui_record_recent(tab: *const c_char, content: *const c_char);
 }
 
 extern "C" fn on_paste_selected(id: libc::c_longlong, text_ptr: *const c_char) {
@@ -20,13 +40,34 @@ extern "C" fn on_paste_selected(id: libc::c_longlong, text_ptr: *const c_char) {
     } else {
         String::new()
     };
-    println!("ACTION: Item chosen id={}, text_len={}, triggering synthetic paste...", id, text.len());
 
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build();
     if let Ok(rt) = rt {
         rt.block_on(async {
             if let Ok(mut client) = super_v_core::ipc_client::IpcClient::connect("/tmp/super-v-clipboard.sock").await {
                 let _ = client.send_request(&super_v_core::ipc::IpcRequest::PasteItem { id: id as i64 }).await;
+            }
+        });
+    }
+}
+
+extern "C" fn on_pin_toggled(id: libc::c_longlong) {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build();
+    if let Ok(rt) = rt {
+        rt.block_on(async {
+            if let Ok(mut client) = super_v_core::ipc_client::IpcClient::connect("/tmp/super-v-clipboard.sock").await {
+                let _ = client.toggle_pin(id as i64).await;
+            }
+        });
+    }
+}
+
+extern "C" fn on_delete_item(id: libc::c_longlong) {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build();
+    if let Ok(rt) = rt {
+        rt.block_on(async {
+            if let Ok(mut client) = super_v_core::ipc_client::IpcClient::connect("/tmp/super-v-clipboard.sock").await {
+                let _ = client.delete_item(id as i64).await;
             }
         });
     }
@@ -103,8 +144,78 @@ fn run_diagnostics_and_autofix() -> Result<()> {
         println!("      ! Desktop entry missing, creating...");
     }
 
-    println!("\nDiagnostics complete. All systems healthy.");
+    println!("
+Diagnostics complete. All systems healthy.");
     Ok(())
+}
+
+fn populate_initial_glyphs_and_history() {
+    let glyph_index = GlyphIndex::load_embedded();
+
+    let c_tab_emoji = CString::new("emoji").unwrap();
+    for e in glyph_index.search("", 120) {
+        let c_glyph = CString::new(e.char.as_str()).unwrap_or_default();
+        let c_name = CString::new(e.name.as_str()).unwrap_or_default();
+        let c_keywords = CString::new(e.keywords.as_str()).unwrap_or_default();
+        unsafe {
+            super_v_ui_add_glyph_item(
+                c_tab_emoji.as_ptr(),
+                c_glyph.as_ptr(),
+                c_name.as_ptr(),
+                c_keywords.as_ptr(),
+                1,
+            );
+        }
+    }
+
+    let c_tab_sym = CString::new("symbol").unwrap();
+    for s in glyph_index.search("", 100) {
+        let c_glyph = CString::new(s.char.as_str()).unwrap_or_default();
+        let c_name = CString::new(s.name.as_str()).unwrap_or_default();
+        let c_keywords = CString::new(s.keywords.as_str()).unwrap_or_default();
+        unsafe {
+            super_v_ui_add_glyph_item(
+                c_tab_sym.as_ptr(),
+                c_glyph.as_ptr(),
+                c_name.as_ptr(),
+                c_keywords.as_ptr(),
+                0,
+            );
+        }
+    }
+
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build();
+    if let Ok(rt) = rt {
+        let history_items = rt.block_on(async {
+            if let Ok(mut client) = super_v_core::ipc_client::IpcClient::connect("/tmp/super-v-clipboard.sock").await {
+                client.get_history(50).await.unwrap_or_default()
+            } else {
+                Vec::new()
+            }
+        });
+
+        if !history_items.is_empty() {
+            unsafe { super_v_ui_clear_history_items(); }
+            for item in history_items {
+                let title = item.text.unwrap_or_else(|| format!("[{}]", item.mime));
+                let c_title = CString::new(title.as_str()).unwrap_or_default();
+                let subtitle = format!("{} • {} bytes", item.category.as_str(), item.byte_size);
+                let c_subtitle = CString::new(subtitle.as_str()).unwrap_or_default();
+                let c_blob = CString::new(item.blob_path.unwrap_or_default().as_str()).unwrap_or_default();
+
+                unsafe {
+                    super_v_ui_add_history_item(
+                        c_title.as_ptr(),
+                        c_subtitle.as_ptr(),
+                        if item.is_pinned { 1 } else { 0 },
+                        if item.is_sensitive { 1 } else { 0 },
+                        item.id.unwrap_or(0) as libc::c_longlong,
+                        c_blob.as_ptr(),
+                    );
+                }
+            }
+        }
+    }
 }
 
 fn main() -> Result<()> {
@@ -139,7 +250,11 @@ fn main() -> Result<()> {
 
     unsafe {
         super_v_ui_set_paste_callback(on_paste_selected);
+        super_v_ui_set_pin_callback(on_pin_toggled);
+        super_v_ui_set_delete_callback(on_delete_item);
     }
+
+    populate_initial_glyphs_and_history();
 
     let c_args: Vec<CString> = args
         .iter()

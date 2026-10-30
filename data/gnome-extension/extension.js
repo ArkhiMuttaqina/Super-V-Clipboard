@@ -3,7 +3,7 @@
 
 /* Super-V Clipboard GNOME Shell Bridge
  *
- * Exposes a minimal DBus interface at org.darulfalah.SuperVBridge.
+ * Exposes a minimal DBus interface at my.id.arkhimuttaqina.SuperVBridge.
  * Listens to MetaSelection::owner-changed and emits ClipboardChanged signal.
  * Zero UI, zero Clutter actors, zero crash risk for the compositor.
  */
@@ -17,7 +17,7 @@ import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
 const DBUS_IFACE = `
 <node>
-  <interface name="org.darulfalah.SuperVBridge">
+  <interface name="my.id.arkhimuttaqina.SuperVBridge">
     <signal name="ClipboardChanged">
       <arg type="s" name="mime"/>
     </signal>
@@ -39,7 +39,7 @@ export default class SuperVBridgeExtension extends Extension {
         });
 
         this._dbusImpl = Gio.DBusExportedObject.wrapJSObject(DBUS_IFACE, this);
-        this._dbusImpl.export(Gio.DBus.session, '/org/darulfalah/SuperVBridge');
+        this._dbusImpl.export(Gio.DBus.session, '/org/arkhimuttaqina/SuperVBridge');
     }
 
     disable() {

@@ -1,5 +1,5 @@
 {
-  "uuid": "super-v-bridge@darulfalah.org",
+  "uuid": "super-v-bridge@arkhimuttaqina.my.id",
   "name": "Super-V Clipboard Bridge",
   "description": "Ultra-lightweight clipboard owner-changed event bridge for Super-V Clipboard (GNOME 50, 51.1+ Wayland). Emits DBus signals to super-v-daemon.",
   "shell-version": [
