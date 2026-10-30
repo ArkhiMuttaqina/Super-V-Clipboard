@@ -41,7 +41,7 @@ fn looks_like_screenshot(path: &std::path::Path) -> bool {
             || name.starts_with("shot-")
             || name.contains("gnome-screenshot")
             || name.contains("capture")
-            || name.starts_with("shot")
+            || name.starts_with("shot"))
 }
 
 fn mime_for(path: &std::path::Path) -> &'static str {
