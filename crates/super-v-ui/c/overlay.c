@@ -1738,6 +1738,21 @@ static gboolean run_selftest(gpointer data) {
         g_timeout_add(1200, (GSourceFunc)g_application_quit_wrapper, NULL);
         return G_SOURCE_REMOVE;
     }
+    {
+        const char *man_teacher = "\xF0\x9F\x91\xA8\xE2\x80\x8D\xF0\x9F\x8F\xAB";
+        char *variant = skin_variant(man_teacher, "\xF0\x9F\x8F\xBF");
+        printf("VERIFY: variant_ok=%s\n", variant ? "yes" : "no");
+        if (variant) {
+            printf("VERIFY: variant_codepoints=");
+            for (const char *p = variant; *p; ) {
+                gunichar cp = g_utf8_get_char(p);
+                printf("U+%04X ", cp);
+                p = g_utf8_next_char(p);
+            }
+            printf("\n");
+            g_free(variant);
+        }
+    }
     printf("VERIFY: no_crash=true\n");
     fflush(stdout);
     g_application_quit(G_APPLICATION(g_application_get_default()));
