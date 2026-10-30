@@ -112,7 +112,17 @@ impl IpcServer {
                 }
                 Ok(IpcRequest::IngestFile { mime, path }) => {
                     let data = std::fs::read(&path);
-                    let _ = std::fs::remove_file(&path);
+                    /* Only the UI's own clipboard spool files are disposable.
+                     * Deleting the caller's file erased cache GIFs the moment
+                     * one was picked, so a second pick found nothing. */
+                    let disposable = std::path::Path::new(&path)
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .map(|name| name.starts_with("super-v-ui-clip-"))
+                        .unwrap_or(false);
+                    if disposable {
+                        let _ = std::fs::remove_file(&path);
+                    }
                     match data {
                         Ok(bytes) => {
                             let store = super_v_core::BlobStore::new(
