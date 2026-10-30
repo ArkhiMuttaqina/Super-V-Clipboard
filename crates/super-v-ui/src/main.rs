@@ -215,7 +215,7 @@ fn store_gifs(provider: &str, items: Vec<(String, String)>) -> Vec<(String, Stri
             entries.iter().filter(|(path, _, _)| !cached_gif_ok(path)).collect();
         if !pending.is_empty() {
             let mut cmd = std::process::Command::new("curl");
-            cmd.args(["-sS", "--parallel", "--parallel-max", "8", "--max-time", "15"]);
+            cmd.args(["-sS", "--parallel", "--parallel-max", "8", "--max-time", "25"]);
             for (path, url, _) in &pending {
                 cmd.arg("-o").arg(path).arg(url);
             }
@@ -346,9 +346,11 @@ fn fetch_giphy(
         .flatten()
     {
         let gif_url = item
-            .pointer("/images/fixed_height_downsampled/url")
-            .or_else(|| item.pointer("/images/fixed_height/url"))
-            .or_else(|| item.pointer("/images/downsized_medium/url"))
+            /* fixed_height keeps every frame; the downsampled variant drops
+             * frames, which made playback look choppy. */
+            .pointer("/images/fixed_height/url")
+            .or_else(|| item.pointer("/images/original/url"))
+            .or_else(|| item.pointer("/images/fixed_height_downsampled/url"))
             .and_then(|u| u.as_str());
         let title = item
             .get("title")

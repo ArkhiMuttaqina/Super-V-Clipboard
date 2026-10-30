@@ -96,11 +96,19 @@ Measured deterministically with `autoresearch.sh`:
   thumbnails, secret masking, emoji/symbols with skin-tone variants, local and
   online GIFs.
 - **GIF tab:** local library plus Tenor or Giphy (whichever is selected), typed
-  queries go to the provider, scrolling pulls the next page, cells animate while
-  the tab is on screen, and picking one pastes the picture (first frame as PNG,
-  the animated file into history) instead of the file path. Downloads run on a
-  worker thread and cache under `~/.cache/super-v-clipboard/gifs`, one file per
-  URL.
+  queries go to the provider, scrolling pulls the next page, and cells play while
+  the tab is on screen.
+  - Playback runs off the GDK frame clock, not per-cell timers: each cell advances
+    from its own frame delay and is only repainted when the decoded frame changed,
+    so a 30-frame GIF plays at its real rate and hidden windows cost nothing.
+  - Media is Giphy's `fixed_height`, which keeps every frame. The downsampled
+    variant drops frames (3-6 per GIF) and looked choppy, so it is only a fallback.
+  - Picking a GIF copies the animated file itself: the clipboard carries
+    `image/gif` unioned with a first-frame texture. WhatsApp/Telegram web receive
+    the moving GIF, texture-only clients still get the first frame. The file is
+    also stored in history, so re-picking from Clipboard keeps the animation.
+  - Downloads run on a worker thread (8 at a time) and cache under
+    `~/.cache/super-v-clipboard/gifs`, one file per URL (~0.4 MB each).
 
 ---
 
