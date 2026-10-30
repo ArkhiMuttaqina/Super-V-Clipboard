@@ -1,6 +1,7 @@
 //! Core data models, SQLite storage, and deduplication engine for super-v-clipboard.
 
 pub mod backend;
+pub mod backup;
 pub mod blob_store;
 pub mod classifier;
 pub mod gif_scanner;
@@ -15,6 +16,7 @@ use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
+pub use backup::BackupManager;
 pub use blob_store::BlobStore;
 pub use classifier::ContentCategory;
 pub use gif_scanner::{GifItem, GifScanner};

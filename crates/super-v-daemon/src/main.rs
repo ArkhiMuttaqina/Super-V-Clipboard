@@ -41,6 +41,16 @@ async fn main() -> Result<()> {
     db_init.insert_or_touch("text/plain", b"https://github.com/GNOME/gnome-shell", Some("https://github.com/GNOME/gnome-shell"))?;
     db_init.insert_or_touch("text/plain", b"Rust programming language", Some("Rust programming language"))?;
 
+    // Test Backup Export & Import
+    let backup_path = "/tmp/super-v-test-backup.json";
+    let exported_count = super_v_core::BackupManager::export_to_json(&db_init, backup_path)?;
+    assert!(exported_count >= 4, "Exported backup must have at least 4 items");
+
+    let mut db_restore = super_v_core::Database::open(":memory:")?;
+    let imported_count = super_v_core::BackupManager::import_from_json(&mut db_restore, backup_path)?;
+    assert_eq!(exported_count, imported_count, "Imported backup must match exported count");
+    let _ = std::fs::remove_file(backup_path);
+
     let db = Arc::new(Mutex::new(db_init));
 
     // Spawn IPC Server in background
@@ -109,6 +119,7 @@ async fn main() -> Result<()> {
     assert!(clamped_pos.x + 420 <= 1920, "Clamped X must fit monitor");
     assert!(clamped_pos.y + 520 <= 1080, "Clamped Y must fit monitor");
 
+    println!("VERIFY: backup_restore_ok=true, exported={}, imported={}", exported_count, imported_count);
     println!("VERIFY: pointer_positioning_ok=true, clamped_x={}, clamped_y={}", clamped_pos.x, clamped_pos.y);
     println!("VERIFY: full_glyphs_embedded=true, emojis=1914, kaomojis=83, symbols=1073");
     println!("VERIFY: secret_filter_verified=true, token_masked={}", super_v_core::SecretFilter::mask_preview("ghp_1234567890abcdefghijklmnopqrstuvwxyz"));
