@@ -5,6 +5,11 @@
 extern "C" {
 #endif
 
+typedef void (*PasteCallback)(long long id, const char *text);
+
+// Sets the global paste callback triggered when an item is chosen
+void super_v_ui_set_paste_callback(PasteCallback cb);
+
 // Runs the full Adwaita GUI Application (event loop)
 int super_v_ui_run_app(int argc, char **argv);
 

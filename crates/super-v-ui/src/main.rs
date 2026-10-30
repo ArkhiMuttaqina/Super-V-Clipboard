@@ -3,12 +3,33 @@ use std::env;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
 
+type PasteCallback = extern "C" fn(id: libc::c_longlong, text: *const c_char);
+
 #[allow(dead_code)]
 extern "C" {
+    fn super_v_ui_set_paste_callback(cb: PasteCallback);
     fn super_v_ui_run_app(argc: c_int, argv: *mut *mut c_char) -> c_int;
     fn super_v_ui_test_prewarm(version_buf: *mut c_char, max_len: c_int) -> c_int;
     fn super_v_ui_add_history_item(title: *const c_char, subtitle: *const c_char, is_pinned: c_int, is_sensitive: c_int, id: libc::c_longlong);
     fn super_v_ui_clear_history_items();
+}
+
+extern "C" fn on_paste_selected(id: libc::c_longlong, text_ptr: *const c_char) {
+    let text = if !text_ptr.is_null() {
+        unsafe { CStr::from_ptr(text_ptr).to_string_lossy().to_string() }
+    } else {
+        String::new()
+    };
+    println!("ACTION: Item chosen id={}, text_len={}, triggering synthetic paste...", id, text.len());
+
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build();
+    if let Ok(rt) = rt {
+        rt.block_on(async {
+            if let Ok(mut client) = super_v_core::ipc_client::IpcClient::connect("/tmp/super-v-clipboard.sock").await {
+                let _ = client.send_request(&super_v_core::ipc::IpcRequest::PasteItem { id: id as i64 }).await;
+            }
+        });
+    }
 }
 
 fn run_diagnostics_and_autofix() -> Result<()> {
@@ -114,6 +135,10 @@ fn main() -> Result<()> {
     if !daemon_check {
         let _ = std::process::Command::new("super-v-daemon").spawn();
         std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    unsafe {
+        super_v_ui_set_paste_callback(on_paste_selected);
     }
 
     let c_args: Vec<CString> = args

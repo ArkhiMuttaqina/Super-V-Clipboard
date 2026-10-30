@@ -6,11 +6,31 @@
 
 static GtkWidget *g_main_window = NULL;
 static GtkWidget *g_clip_list = NULL;
+static PasteCallback g_paste_cb = NULL;
+
+void super_v_ui_set_paste_callback(PasteCallback cb) {
+    g_paste_cb = cb;
+}
 
 static void on_settings_clicked(GtkButton *btn, gpointer user_data) {
     (void)btn;
     GtkWindow *parent = GTK_WINDOW(user_data);
     super_v_ui_show_settings((void*)parent);
+}
+
+static void on_row_activated(GtkListBox *box, GtkListBoxRow *row, gpointer user_data) {
+    (void)box;
+    (void)user_data;
+    long long id = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(row), "super_v_id"));
+    const char *text = (const char*)g_object_get_data(G_OBJECT(row), "super_v_text");
+
+    if (g_paste_cb) {
+        g_paste_cb(id, text);
+    }
+
+    if (g_main_window) {
+        gtk_window_close(GTK_WINDOW(g_main_window));
+    }
 }
 
 void super_v_ui_show_settings(void *parent_window) {
@@ -103,7 +123,6 @@ void super_v_ui_clear_history_items(void) {
 }
 
 void super_v_ui_add_history_item(const char *title, const char *subtitle, int is_pinned, int is_sensitive, long long id) {
-    (void)id;
     if (!g_clip_list) return;
 
     GtkWidget *row = adw_action_row_new();
@@ -121,6 +140,11 @@ void super_v_ui_add_history_item(const char *title, const char *subtitle, int is
         GtkWidget *pin_icon = gtk_image_new_from_icon_name("view-pin-symbolic");
         gtk_widget_set_tooltip_text(pin_icon, "Pinned Item");
         adw_action_row_add_prefix(ADW_ACTION_ROW(row), pin_icon);
+    }
+
+    g_object_set_data(G_OBJECT(row), "super_v_id", GINT_TO_POINTER((int)id));
+    if (title) {
+        g_object_set_data_full(G_OBJECT(row), "super_v_text", g_strdup(title), g_free);
     }
 
     gtk_list_box_append(GTK_LIST_BOX(g_clip_list), row);
@@ -168,6 +192,9 @@ static GtkWidget* create_main_window(AdwApplication *app) {
     gtk_widget_set_margin_end(g_clip_list, 12);
     gtk_widget_set_margin_top(g_clip_list, 6);
     gtk_widget_set_margin_bottom(g_clip_list, 6);
+
+    // Connect row-activated event for instant paste & auto-close
+    g_signal_connect(g_clip_list, "row-activated", G_CALLBACK(on_row_activated), NULL);
 
     // Populate initial items
     super_v_ui_add_history_item("Important: cargo build --workspace", "Pinned • Just now", 1, 0, 1);
