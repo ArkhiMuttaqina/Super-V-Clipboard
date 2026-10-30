@@ -12,7 +12,7 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-authors = ["Arkhi Muttaqina <arkhims@users.noreply.github.com>"]
+authors = ["Arkhi Muttaqina <arkhi07@hotmail.co.id>"]
 license = "GPL-3.0-or-later"
 
 [workspace.dependencies]

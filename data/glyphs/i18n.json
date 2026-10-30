@@ -1,0 +1,841 @@
+{
+ "id": {
+  "senang": [
+   "happy",
+   "smile",
+   "smiling"
+  ],
+  "bahagia": [
+   "happy",
+   "joy",
+   "smiley"
+  ],
+  "sedih": [
+   "sad",
+   "cry",
+   "disappointed",
+   "pensive"
+  ],
+  "menangis": [
+   "cry",
+   "crying",
+   "sob",
+   "tear"
+  ],
+  "nangis": [
+   "cry",
+   "sob",
+   "tear"
+  ],
+  "marah": [
+   "angry",
+   "rage",
+   "mad",
+   "pout"
+  ],
+  "kesal": [
+   "annoyed",
+   "unamused",
+   "irked"
+  ],
+  "jijik": [
+   "disgust",
+   "sick"
+  ],
+  "takut": [
+   "fear",
+   "scared",
+   "scream"
+  ],
+  "kaget": [
+   "shocked",
+   "surprised",
+   "astonished"
+  ],
+  "bingung": [
+   "confused"
+  ],
+  "malu": [
+   "shy",
+   "blush"
+  ],
+  "cinta": [
+   "love",
+   "heart"
+  ],
+  "sayang": [
+   "love",
+   "heart"
+  ],
+  "hati": [
+   "heart"
+  ],
+  "patah": [
+   "broken",
+   "heartbreak"
+  ],
+  "cium": [
+   "kiss"
+  ],
+  "peluk": [
+   "hug"
+  ],
+  "tersenyum": [
+   "smile"
+  ],
+  "tertawa": [
+   "laugh",
+   "joy",
+   "grin"
+  ],
+  "keren": [
+   "cool",
+   "sunglasses"
+  ],
+  "kucing": [
+   "cat",
+   "kitten"
+  ],
+  "anjing": [
+   "dog",
+   "puppy"
+  ],
+  "tikus": [
+   "mouse",
+   "rat"
+  ],
+  "sapi": [
+   "cow",
+   "ox"
+  ],
+  "kambing": [
+   "goat"
+  ],
+  "ayam": [
+   "chicken",
+   "rooster"
+  ],
+  "bebek": [
+   "duck"
+  ],
+  "burung": [
+   "bird"
+  ],
+  "ikan": [
+   "fish"
+  ],
+  "gurita": [
+   "octopus"
+  ],
+  "kupu": [
+   "butterfly"
+  ],
+  "lebah": [
+   "bee"
+  ],
+  "semut": [
+   "ant"
+  ],
+  "laba": [
+   "spider"
+  ],
+  "ular": [
+   "snake"
+  ],
+  "kuda": [
+   "horse"
+  ],
+  "gajah": [
+   "elephant"
+  ],
+  "singa": [
+   "lion"
+  ],
+  "harimau": [
+   "tiger"
+  ],
+  "monyet": [
+   "monkey"
+  ],
+  "panda": [
+   "panda"
+  ],
+  "beruang": [
+   "bear"
+  ],
+  "kelinci": [
+   "rabbit",
+   "bunny"
+  ],
+  "serigala": [
+   "wolf"
+  ],
+  "rubah": [
+   "fox"
+  ],
+  "babi": [
+   "pig"
+  ],
+  "unta": [
+   "camel"
+  ],
+  "jerapah": [
+   "giraffe"
+  ],
+  "zebra": [
+   "zebra"
+  ],
+  "rusa": [
+   "deer"
+  ],
+  "domba": [
+   "sheep",
+   "ewe"
+  ],
+  "bunga": [
+   "flower",
+   "blossom"
+  ],
+  "mawar": [
+   "rose"
+  ],
+  "matahari": [
+   "sun"
+  ],
+  "bulan": [
+   "moon"
+  ],
+  "bintang": [
+   "star"
+  ],
+  "awan": [
+   "cloud"
+  ],
+  "hujan": [
+   "rain"
+  ],
+  "salju": [
+   "snow"
+  ],
+  "petir": [
+   "lightning",
+   "thunder"
+  ],
+  "api": [
+   "fire",
+   "flame"
+  ],
+  "air": [
+   "water",
+   "droplet"
+  ],
+  "laut": [
+   "ocean",
+   "wave"
+  ],
+  "gunung": [
+   "mountain"
+  ],
+  "pohon": [
+   "tree"
+  ],
+  "daun": [
+   "leaf"
+  ],
+  "rumput": [
+   "herb",
+   "grass"
+  ],
+  "kaktus": [
+   "cactus"
+  ],
+  "jamur": [
+   "mushroom"
+  ],
+  "makan": [
+   "food",
+   "eat"
+  ],
+  "minum": [
+   "drink"
+  ],
+  "kopi": [
+   "coffee"
+  ],
+  "teh": [
+   "tea"
+  ],
+  "bir": [
+   "beer"
+  ],
+  "susu": [
+   "milk"
+  ],
+  "roti": [
+   "bread"
+  ],
+  "nasi": [
+   "rice"
+  ],
+  "mie": [
+   "noodles"
+  ],
+  "pizza": [
+   "pizza"
+  ],
+  "burger": [
+   "hamburger"
+  ],
+  "kentang": [
+   "potato",
+   "fries"
+  ],
+  "telur": [
+   "egg"
+  ],
+  "keju": [
+   "cheese"
+  ],
+  "daging": [
+   "meat"
+  ],
+  "apel": [
+   "apple"
+  ],
+  "pisang": [
+   "banana"
+  ],
+  "anggur": [
+   "grapes"
+  ],
+  "semangka": [
+   "watermelon"
+  ],
+  "jeruk": [
+   "orange",
+   "tangerine"
+  ],
+  "lemon": [
+   "lemon"
+  ],
+  "stroberi": [
+   "strawberry"
+  ],
+  "ceri": [
+   "cherry"
+  ],
+  "nanas": [
+   "pineapple"
+  ],
+  "kelapa": [
+   "coconut"
+  ],
+  "alpukat": [
+   "avocado"
+  ],
+  "tomat": [
+   "tomato"
+  ],
+  "jagung": [
+   "corn"
+  ],
+  "cabai": [
+   "hot",
+   "pepper"
+  ],
+  "es": [
+   "ice"
+  ],
+  "kue": [
+   "cake"
+  ],
+  "permen": [
+   "candy"
+  ],
+  "cokelat": [
+   "chocolate"
+  ],
+  "donat": [
+   "donut"
+  ],
+  "pai": [
+   "pie"
+  ],
+  "mobil": [
+   "car"
+  ],
+  "motor": [
+   "motorcycle"
+  ],
+  "sepeda": [
+   "bicycle"
+  ],
+  "bus": [
+   "bus"
+  ],
+  "kereta": [
+   "train"
+  ],
+  "pesawat": [
+   "airplane"
+  ],
+  "kapal": [
+   "ship",
+   "boat"
+  ],
+  "roket": [
+   "rocket"
+  ],
+  "helikopter": [
+   "helicopter"
+  ],
+  "taksi": [
+   "taxi"
+  ],
+  "truk": [
+   "truck"
+  ],
+  "rumah": [
+   "house"
+  ],
+  "gedung": [
+   "building",
+   "office"
+  ],
+  "sekolah": [
+   "school"
+  ],
+  "masjid": [
+   "mosque"
+  ],
+  "gereja": [
+   "church"
+  ],
+  "kuil": [
+   "temple"
+  ],
+  "kunci": [
+   "key",
+   "lock"
+  ],
+  "pintu": [
+   "door"
+  ],
+  "jendela": [
+   "window"
+  ],
+  "kursi": [
+   "chair"
+  ],
+  "meja": [
+   "table"
+  ],
+  "kasur": [
+   "bed"
+  ],
+  "buku": [
+   "book"
+  ],
+  "pena": [
+   "pen"
+  ],
+  "pensil": [
+   "pencil"
+  ],
+  "komputer": [
+   "computer",
+   "laptop"
+  ],
+  "ponsel": [
+   "phone",
+   "telephone",
+   "mobile"
+  ],
+  "jam": [
+   "clock",
+   "watch",
+   "time"
+  ],
+  "kamera": [
+   "camera"
+  ],
+  "televisi": [
+   "television",
+   "tv"
+  ],
+  "radio": [
+   "radio"
+  ],
+  "lampu": [
+   "light",
+   "bulb"
+  ],
+  "kado": [
+   "gift",
+   "present"
+  ],
+  "uang": [
+   "money",
+   "dollar",
+   "currency"
+  ],
+  "kartu": [
+   "card"
+  ],
+  "bola": [
+   "ball"
+  ],
+  "sepak": [
+   "soccer",
+   "football"
+  ],
+  "basket": [
+   "basketball"
+  ],
+  "tenis": [
+   "tennis"
+  ],
+  "renang": [
+   "swim"
+  ],
+  "lari": [
+   "run",
+   "runner"
+  ],
+  "musik": [
+   "music",
+   "musical",
+   "note"
+  ],
+  "gitar": [
+   "guitar"
+  ],
+  "drum": [
+   "drum"
+  ],
+  "mikrofon": [
+   "microphone"
+  ],
+  "film": [
+   "movie",
+   "cinema"
+  ],
+  "game": [
+   "video",
+   "game"
+  ],
+  "kontrol": [
+   "controller",
+   "joystick"
+  ],
+  "dadu": [
+   "dice"
+  ],
+  "piala": [
+   "trophy"
+  ],
+  "medali": [
+   "medal"
+  ],
+  "bendera": [
+   "flag"
+  ],
+  "mahkota": [
+   "crown"
+  ],
+  "cincin": [
+   "ring"
+  ],
+  "permata": [
+   "gem",
+   "diamond"
+  ],
+  "tas": [
+   "bag",
+   "handbag"
+  ],
+  "topi": [
+   "hat",
+   "cap"
+  ],
+  "kacamata": [
+   "glasses"
+  ],
+  "sepatu": [
+   "shoe"
+  ],
+  "baju": [
+   "shirt"
+  ],
+  "celana": [
+   "jeans",
+   "pants"
+  ],
+  "gaun": [
+   "dress"
+  ],
+  "jas": [
+   "coat"
+  ],
+  "jenggot": [
+   "beard"
+  ],
+  "rambut": [
+   "hair"
+  ],
+  "mata": [
+   "eye",
+   "eyes"
+  ],
+  "telinga": [
+   "ear"
+  ],
+  "hidung": [
+   "nose"
+  ],
+  "mulut": [
+   "mouth",
+   "lips"
+  ],
+  "tangan": [
+   "hand"
+  ],
+  "jari": [
+   "finger"
+  ],
+  "kaki": [
+   "foot",
+   "leg"
+  ],
+  "otak": [
+   "brain"
+  ],
+  "jantung": [
+   "heart",
+   "organ"
+  ],
+  "darah": [
+   "blood"
+  ],
+  "tulang": [
+   "bone"
+  ],
+  "obat": [
+   "pill",
+   "medicine"
+  ],
+  "dokter": [
+   "doctor",
+   "health"
+  ],
+  "sakit": [
+   "sick",
+   "hospital"
+  ],
+  "panas": [
+   "hot",
+   "fire"
+  ],
+  "dingin": [
+   "cold",
+   "snow"
+  ],
+  "tidur": [
+   "sleep",
+   "sleeping"
+  ],
+  "capek": [
+   "tired",
+   "sleepy"
+  ],
+  "kerja": [
+   "work",
+   "office"
+  ],
+  "belanja": [
+   "shopping",
+   "cart"
+  ],
+  "masak": [
+   "cook"
+  ],
+  "cuci": [
+   "wash",
+   "soap"
+  ],
+  "bersih": [
+   "clean",
+   "sparkle"
+  ],
+  "tanda": [
+   "check",
+   "mark"
+  ],
+  "silang": [
+   "cross",
+   "mark"
+  ],
+  "panah": [
+   "arrow"
+  ],
+  "seru": [
+   "exclamation"
+  ],
+  "tanya": [
+   "question"
+  ],
+  "info": [
+   "information"
+  ],
+  "larangan": [
+   "prohibited",
+   "no",
+   "entry"
+  ],
+  "bahaya": [
+   "warning"
+  ],
+  "listrik": [
+   "electric",
+   "zap"
+  ],
+  "baterai": [
+   "battery"
+  ],
+  "sinyal": [
+   "signal",
+   "antenna"
+  ],
+  "wifi": [
+   "wifi",
+   "wireless"
+  ],
+  "bluetooth": [
+   "bluetooth"
+  ],
+  "aman": [
+   "lock",
+   "secure"
+  ],
+  "buka": [
+   "unlock",
+   "open"
+  ],
+  "waktu": [
+   "time",
+   "clock",
+   "hourglass"
+  ],
+  "kalender": [
+   "calendar",
+   "date"
+  ],
+  "ulang": [
+   "birthday",
+   "cake",
+   "anniversary"
+  ],
+  "pesta": [
+   "party",
+   "confetti"
+  ],
+  "doa": [
+   "pray",
+   "prayer"
+  ],
+  "salam": [
+   "wave",
+   "hello"
+  ],
+  "halo": [
+   "wave",
+   "hello"
+  ],
+  "jempol": [
+   "thumbs",
+   "up"
+  ],
+  "setuju": [
+   "thumbs",
+   "ok"
+  ],
+  "tolak": [
+   "thumbs",
+   "down"
+  ],
+  "oke": [
+   "ok",
+   "hand"
+  ],
+  "damai": [
+   "peace",
+   "victory"
+  ],
+  "tunjuk": [
+   "point"
+  ],
+  "tepuk": [
+   "clap"
+  ],
+  "matematika": [
+   "math"
+  ],
+  "angka": [
+   "digit",
+   "number"
+  ],
+  "hitung": [
+   "math",
+   "number"
+  ],
+  "tanda_baca": [
+   "punctuation"
+  ],
+  "yunani": [
+   "greek"
+  ],
+  "panah_kanan": [
+   "arrow",
+   "right"
+  ]
+ },
+ "en": {
+  "ok": [
+   "ok",
+   "hand"
+  ],
+  "cool": [
+   "cool",
+   "sunglasses"
+  ],
+  "poop": [
+   "pile",
+   "poop"
+  ],
+  "crying": [
+   "cry",
+   "crying",
+   "sob"
+  ],
+  "food": [
+   "food",
+   "eat"
+  ],
+  "bday": [
+   "birthday",
+   "cake"
+  ],
+  "bff": [
+   "handshake",
+   "love"
+  ],
+  "pleading": [
+   "pleading",
+   "puppy"
+  ],
+  "skull": [
+   "skull",
+   "dead"
+  ]
+ }
+}

@@ -1,3 +1,4 @@
+use super_v_core::glyphs::GlyphIndex;
 use super_v_core::{
     classifier::ContentCategory,
     positioning::{Point, Rect, WindowPlacer},
@@ -111,4 +112,52 @@ fn test_window_placer_clamping() {
     let pos2 = WindowPlacer::compute_position(p2, (420, 520), mon, 10);
     assert!(pos2.x + 420 <= 1920 - 10);
     assert!(pos2.y + 520 <= 1080 - 10);
+}
+
+#[test]
+fn test_localized_emoji_search_indonesian_and_english() {
+    let idx = GlyphIndex::load_embedded();
+
+    // Indonesian words resolve through the bundled dictionary.
+    let sedih = idx.search("emoji", "sedih", "en,id", 0, 24);
+    assert!(!sedih.is_empty(), "sedih should match crying/sad emoji");
+    assert!(sedih.iter().any(|g| {
+        let blob = format!("{} {}", g.name, g.keywords);
+        blob.contains("sad") || blob.contains("cry") || blob.contains("pensive") || blob.contains("disappointed")
+    }));
+
+    let marah = idx.search("emoji", "marah", "en,id", 0, 24);
+    assert!(!marah.is_empty(), "marah should match angry emoji");
+
+    // English still works through Unicode names directly.
+    let angry = idx.search("emoji", "angry", "en,id", 0, 24);
+    assert!(!angry.is_empty());
+
+    // Disabling Indonesian must drop the alias-only results.
+    let without_id = idx.search("emoji", "sedih", "en", 0, 24);
+    assert!(without_id.is_empty(), "sedih is not an English token");
+
+    // Empty query pages the whole dataset.
+    let page = idx.search("emoji", "", "en,id", 0, 10);
+    assert_eq!(page.len(), 10);
+}
+
+#[test]
+fn test_symbol_search_and_glyph_paging_offsets() {
+    let idx = GlyphIndex::load_embedded();
+    assert_eq!(idx.emoji_count(), 1914);
+    assert_eq!(idx.symbol_count(), 1073);
+
+    let arrows = idx.search("symbol", "panah", "en,id", 0, 50);
+    assert!(!arrows.is_empty(), "panah should match arrow symbols");
+
+    // Paging must not overlap and must terminate on the dataset tail.
+    let first = idx.search("emoji", "", "en,id", 0, 100);
+    let second = idx.search("emoji", "", "en,id", 100, 100);
+    assert_eq!(first.len(), 100);
+    assert_eq!(second.len(), 100);
+    assert_ne!(first[0].char, second[0].char);
+
+    let tail = idx.search("emoji", "", "en,id", 1900, 100);
+    assert_eq!(tail.len(), 14);
 }

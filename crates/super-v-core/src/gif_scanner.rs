@@ -23,6 +23,9 @@ impl GifScanner {
             let h = PathBuf::from(home);
             dirs.push(h.join("Downloads"));
             dirs.push(h.join("Pictures"));
+            dirs.push(h.join("Pictures/Screenshots"));
+            dirs.push(h.join("Videos"));
+            dirs.push(h.join("Documents"));
             dirs.push(h.join(".local/share/super-v-clipboard/gifs"));
         }
         Self { search_dirs: dirs }

@@ -8,8 +8,11 @@ use super_v_core::glyphs::GlyphIndex;
 type PasteCallback = extern "C" fn(id: libc::c_longlong, text: *const c_char);
 type PinCallback = extern "C" fn(id: libc::c_longlong);
 type DeleteCallback = extern "C" fn(id: libc::c_longlong);
-type GlyphProvider = extern "C" fn(tab: *const c_char, offset: c_int, limit: c_int) -> c_int;
+type GlyphProvider = extern "C" fn(tab: *const c_char, query: *const c_char, offset: c_int, limit: c_int) -> c_int;
 type ActivateHook = extern "C" fn();
+type LanguageHook = extern "C" fn(langs: *const c_char);
+type GifProviderHook = extern "C" fn(id: *const c_char);
+type GifReloadHook = extern "C" fn();
 
 #[allow(dead_code)]
 extern "C" {
@@ -18,6 +21,14 @@ extern "C" {
     fn super_v_ui_set_delete_callback(cb: DeleteCallback);
     fn super_v_ui_set_glyph_provider(cb: GlyphProvider);
     fn super_v_ui_set_activate_hook(cb: ActivateHook);
+    fn super_v_ui_set_language_hook(cb: LanguageHook);
+    fn super_v_ui_set_gif_provider_hook(cb: GifProviderHook);
+    fn super_v_ui_set_gif_reload_hook(cb: GifReloadHook);
+    fn super_v_ui_apply_preferences(langs: *const c_char, gif_provider: *const c_char);
+    fn super_v_ui_clear_glyphs(tab: *const c_char);
+    fn super_v_ui_add_gif_item(path: *const c_char, title: *const c_char);
+    fn super_v_ui_clear_gif_items();
+    fn super_v_ui_set_gif_hint(text: *const c_char);
     fn super_v_ui_run_app(argc: c_int, argv: *mut *mut c_char) -> c_int;
     fn super_v_ui_test_prewarm(version_buf: *mut c_char, max_len: c_int) -> c_int;
     fn super_v_ui_add_history_item(
@@ -45,16 +56,224 @@ fn glyph_index() -> &'static GlyphIndex {
     IDX.get_or_init(GlyphIndex::load_embedded)
 }
 
+/* ------------------------------------------------------------------ settings */
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct Settings {
+    emoji_languages: String,
+    gif_provider: String,
+    gif_api_key: String,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            emoji_languages: "en,id".to_string(),
+            gif_provider: "local".to_string(),
+            gif_api_key: String::new(),
+        }
+    }
+}
+
+fn config_dir() -> std::path::PathBuf {
+    if let Ok(x) = std::env::var("XDG_CONFIG_HOME") {
+        if !x.is_empty() {
+            return std::path::PathBuf::from(x).join("super-v-clipboard");
+        }
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    std::path::PathBuf::from(home).join(".config").join("super-v-clipboard")
+}
+
+fn settings_path() -> std::path::PathBuf {
+    config_dir().join("settings.json")
+}
+
+fn load_settings() -> Settings {
+    let path = settings_path();
+    match std::fs::read_to_string(&path) {
+        Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
+        Err(_) => Settings::default(),
+    }
+}
+
+fn save_settings(cfg: &Settings) {
+    let dir = config_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    if let Ok(text) = serde_json::to_string_pretty(cfg) {
+        let _ = std::fs::write(settings_path(), text);
+    }
+}
+
+static LANGS: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+static GIF_PROVIDER: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+fn current_langs() -> String {
+    LANGS.lock().map(|g| g.clone()).unwrap_or_else(|_| "en,id".to_string())
+}
+
+fn current_gif_provider() -> String {
+    GIF_PROVIDER.lock().map(|g| g.clone()).unwrap_or_else(|_| "local".to_string())
+}
+
+fn cache_dir() -> std::path::PathBuf {
+    let base = std::env::var("XDG_CACHE_HOME").ok().filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            std::path::PathBuf::from(home).join(".cache")
+        });
+    base.join("super-v-clipboard").join("gifs")
+}
+
+/// Fetch trending/search GIFs from Tenor and cache the files locally.
+fn fetch_tenor(api_key: &str, query: &str, limit: usize) -> Vec<(String, String)> {
+    if api_key.is_empty() {
+        return Vec::new();
+    }
+    let encoded: String = query.trim().replace(' ', "+");
+    let mut url = format!(
+        "https://tenor.googleapis.com/v2/{}?key={}&limit={}&media_filter=tinygif",
+        if encoded.is_empty() { "featured" } else { "search" },
+        api_key,
+        limit
+    );
+    if !encoded.is_empty() {
+        url.push_str(&format!("&q={}", encoded));
+    }
+
+    let out = std::process::Command::new("curl")
+        .args(["-sS", "--max-time", "8", &url])
+        .output();
+    let body = match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+        _ => return Vec::new(),
+    };
+
+    let json: serde_json::Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+
+    let dir = cache_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let mut items = Vec::new();
+
+    if let Some(results) = json.get("results").and_then(|r| r.as_array()) {
+        for (i, item) in results.iter().enumerate() {
+            let gif_url = item
+                .get("media_formats")
+                .and_then(|m| m.get("tinygif"))
+                .and_then(|t| t.get("url"))
+                .and_then(|u| u.as_str());
+            let title = item.get("content_description").and_then(|t| t.as_str()).unwrap_or("GIF");
+            if let Some(gif_url) = gif_url {
+                use std::hash::{Hash, Hasher};
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                gif_url.hash(&mut hasher);
+                let dest = dir.join(format!("{}-{}.gif", hasher.finish(), i));
+                if !dest.exists() {
+                    let _ = std::process::Command::new("curl")
+                        .args(["-sS", "--max-time", "8", "-o", &dest.to_string_lossy(), gif_url])
+                        .status();
+                }
+                if dest.exists() {
+                    items.push((dest.to_string_lossy().to_string(), title.to_string()));
+                }
+            }
+        }
+    }
+    items
+}
+
+fn load_gifs() {
+    let provider = current_gif_provider();
+    unsafe { super_v_ui_clear_gif_items(); }
+
+    let mut rows: Vec<(String, String)> = Vec::new();
+
+    if provider != "local" {
+        let cfg = load_settings();
+        rows = fetch_tenor(&cfg.gif_api_key, "", 24);
+    }
+
+    for item in super_v_core::GifScanner::default_dirs().scan_local_gifs(60) {
+        rows.push((item.path, item.filename));
+    }
+
+    let cfg = load_settings();
+    let hint = if provider == "local" {
+        "Local GIF library".to_string()
+    } else if cfg.gif_api_key.is_empty() {
+        format!("{} selected: add gif_api_key to settings.json to fetch online", provider)
+    } else {
+        format!("{} results", provider)
+    };
+    if let Ok(hint_c) = CString::new(hint) {
+        unsafe { super_v_ui_set_gif_hint(hint_c.as_ptr()); }
+    }
+
+    for (path, title) in rows {
+        let c_path = CString::new(path).unwrap_or_default();
+        let c_title = CString::new(title).unwrap_or_default();
+        unsafe { super_v_ui_add_gif_item(c_path.as_ptr(), c_title.as_ptr()); }
+    }
+}
+
+extern "C" fn on_language_changed(langs: *const c_char) {
+    if langs.is_null() {
+        return;
+    }
+    let value = unsafe { CStr::from_ptr(langs) }.to_string_lossy().to_string();
+    if let Ok(mut guard) = LANGS.lock() {
+        *guard = value.clone();
+    }
+    let mut cfg = load_settings();
+    cfg.emoji_languages = value;
+    save_settings(&cfg);
+}
+
+extern "C" fn on_gif_provider_changed(provider: *const c_char) {
+    if provider.is_null() {
+        return;
+    }
+    let value = unsafe { CStr::from_ptr(provider) }.to_string_lossy().to_string();
+    if let Ok(mut guard) = GIF_PROVIDER.lock() {
+        *guard = value.clone();
+    }
+    let mut cfg = load_settings();
+    cfg.gif_provider = value;
+    save_settings(&cfg);
+}
+
+extern "C" fn on_gif_reload() {
+    load_gifs();
+}
+
+
 /* Zero-alloc paging: only the requested page becomes GTK widgets. */
-extern "C" fn provide_glyph_page(tab: *const c_char, offset: c_int, limit: c_int) -> c_int {
-    if tab.is_null() || limit <= 0 { return 0; }
+extern "C" fn provide_glyph_page(tab: *const c_char, query: *const c_char, offset: c_int, limit: c_int) -> c_int {
+    if tab.is_null() || limit <= 0 {
+        return 0;
+    }
     let tab_name = unsafe { CStr::from_ptr(tab) }.to_string_lossy().to_string();
+    let query_str = if query.is_null() {
+        String::new()
+    } else {
+        unsafe { CStr::from_ptr(query) }.to_string_lossy().to_string()
+    };
+
+    if tab_name == "gif" {
+        return 0;
+    }
+
+    let langs = current_langs();
     let idx = glyph_index();
-    let page = idx.page(&tab_name, offset.max(0) as usize, limit as usize);
-    let mut emitted = 0;
+    let page = idx.search(&tab_name, &query_str, &langs, offset.max(0) as usize, limit as usize);
 
     let c_tab = match CString::new(tab_name.as_str()) { Ok(v) => v, Err(_) => return 0 };
-    let skin = if tab_name == "emoji" { 1 } else { 0 };
+    let skin_tab = tab_name == "emoji";
+    let mut emitted = 0;
 
     for g in &page {
         let c_glyph = match CString::new(g.char.as_str()) { Ok(v) => v, Err(_) => continue };
@@ -62,7 +281,8 @@ extern "C" fn provide_glyph_page(tab: *const c_char, offset: c_int, limit: c_int
         let c_kw = CString::new(g.keywords.as_str()).unwrap_or_default();
         unsafe {
             super_v_ui_add_glyph_item(
-                c_tab.as_ptr(), c_glyph.as_ptr(), c_name.as_ptr(), c_kw.as_ptr(), skin,
+                c_tab.as_ptr(), c_glyph.as_ptr(), c_name.as_ptr(), c_kw.as_ptr(),
+                if skin_tab && g.tone == 1 { 1 } else { 0 },
             );
         }
         emitted += 1;
@@ -118,6 +338,12 @@ extern "C" fn on_primary_activated() {
     });
 
     unsafe { super_v_ui_clear_history_items(); }
+    load_gifs();
+    {
+        let langs = CString::new(current_langs()).unwrap_or_default();
+        let gif = CString::new(current_gif_provider()).unwrap_or_default();
+        unsafe { super_v_ui_apply_preferences(langs.as_ptr(), gif.as_ptr()); }
+    }
     for item in items {
         let title = item.text.unwrap_or_else(|| format!("[{}]", item.mime));
         let subtitle = format!("{} \u{2022} {} B", item.category.as_str(), item.byte_size);
@@ -181,6 +407,12 @@ fn main() -> Result<()> {
     if std::env::var_os("GSK_RENDERER").is_none() {
         std::env::set_var("GSK_RENDERER", "cairo");
     }
+    {
+        let cfg = load_settings();
+        if let Ok(mut g) = LANGS.lock() { *g = cfg.emoji_languages; }
+        if let Ok(mut g) = GIF_PROVIDER.lock() { *g = cfg.gif_provider; }
+    }
+
     let args: Vec<String> = env::args().collect();
 
     if args.iter().any(|a| a == "--diagnostics" || a == "--doctor" || a == "--check") {
@@ -206,6 +438,9 @@ fn main() -> Result<()> {
         super_v_ui_set_delete_callback(on_delete_item);
         super_v_ui_set_glyph_provider(provide_glyph_page);
         super_v_ui_set_activate_hook(on_primary_activated);
+        super_v_ui_set_language_hook(on_language_changed);
+        super_v_ui_set_gif_provider_hook(on_gif_provider_changed);
+        super_v_ui_set_gif_reload_hook(on_gif_reload);
     }
 
     let c_args: Vec<CString> = args.iter()
