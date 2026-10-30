@@ -197,27 +197,38 @@ fn cached_gif_ok(path: &std::path::Path) -> bool {
 fn store_gifs(provider: &str, items: Vec<(String, String)>) -> Vec<(String, String)> {
     let dir = cache_dir();
     let _ = std::fs::create_dir_all(&dir);
-    let entries: Vec<(std::path::PathBuf, String, String)> = items
-        .into_iter()
-        .map(|(url, title)| (gif_cache_path(provider, &url), url, title))
-        .collect();
-
-    let pending: Vec<&(std::path::PathBuf, String, String)> =
-        entries.iter().filter(|(path, _, _)| !cached_gif_ok(path)).collect();
-    if !pending.is_empty() {
-        let mut cmd = std::process::Command::new("curl");
-        cmd.args(["-sS", "--parallel", "--parallel-max", "8", "--max-time", "15"]);
-        for (path, url, _) in &pending {
-            cmd.arg("-o").arg(path).arg(url);
+    /* Two transfers writing the same destination race inside one parallel curl
+     * run and can leave the file missing, so collapse duplicate URLs first. */
+    let mut unique: Vec<(std::path::PathBuf, String, String)> = Vec::new();
+    let mut seen: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
+    for (url, title) in items {
+        let path = gif_cache_path(provider, &url);
+        if !seen.insert(path.clone()) {
+            continue;
         }
-        let _ = cmd.status();
+        unique.push((path, url, title));
+    }
+    let entries = unique;
+
+    {
+        let pending: Vec<&(std::path::PathBuf, String, String)> =
+            entries.iter().filter(|(path, _, _)| !cached_gif_ok(path)).collect();
+        if !pending.is_empty() {
+            let mut cmd = std::process::Command::new("curl");
+            cmd.args(["-sS", "--parallel", "--parallel-max", "8", "--max-time", "15"]);
+            for (path, url, _) in &pending {
+                cmd.arg("-o").arg(path).arg(url);
+            }
+            let _ = cmd.status();
+        }
     }
 
-    entries
+    let kept: Vec<(String, String)> = entries
         .into_iter()
         .filter(|(path, _, _)| cached_gif_ok(path))
         .map(|(path, _, title)| (path.to_string_lossy().to_string(), title))
-        .collect()
+        .collect();
+    kept
 }
 
 const GIF_PAGE: usize = 24;

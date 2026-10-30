@@ -95,6 +95,12 @@ Measured deterministically with `autoresearch.sh`:
 - **Pick outside the clipboard:** history with pin sections, timestamps, image
   thumbnails, secret masking, emoji/symbols with skin-tone variants, local and
   online GIFs.
+- **GIF tab:** local library plus Tenor or Giphy (whichever is selected), typed
+  queries go to the provider, scrolling pulls the next page, cells animate while
+  the tab is on screen, and picking one pastes the picture (first frame as PNG,
+  the animated file into history) instead of the file path. Downloads run on a
+  worker thread and cache under `~/.cache/super-v-clipboard/gifs`, one file per
+  URL.
 
 ---
 
@@ -108,8 +114,6 @@ it.
       stay compatible).
 - [ ] **Packaging** — `.deb` + apt repository, AUR `PKGBUILD`, then Flatpak. This
       is the single biggest gap against the projects above.
-- [ ] **GIF tab** — provider fixes are being worked on in parallel; the tab stays
-      behind its own preference until it is stable.
 - [ ] **Import/migration** from other managers' history formats.
 - [ ] **Multi-monitor placement** — follow the pointer across outputs.
 - [ ] **Translations** for the UI (Indonesian first), keeping the data-only
