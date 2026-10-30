@@ -1,5 +1,6 @@
 #include "overlay.h"
 #include <adwaita.h>
+#include <pango/pangocairo.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -702,6 +703,69 @@ static gunichar utf8_decode_at(const char *s, int *len_out) {
     return g_utf8_get_char(s);
 }
 
+/* Emoji font coverage.
+ * The installed colour font (Noto Color Emoji 2.051 on Ubuntu) covers Emoji
+ * 15.1, while the dataset is Unicode Emoji 18.0. Sequences newer than the font
+ * have no glyph, so Pango falls back to a font that draws the code points in a
+ * hex box. Probe the emoji font once and draw a neutral placeholder instead. */
+static PangoFont *g_emoji_font = NULL;
+static gboolean g_emoji_font_probed = FALSE;
+static gboolean g_emoji_font_usable = FALSE;
+static int g_missing_glyphs = 0;
+
+static void probe_emoji_font(void) {
+    if (g_emoji_font_probed) return;
+    g_emoji_font_probed = TRUE;
+    PangoFontMap *map = pango_cairo_font_map_get_default();
+    if (!map) return;
+    PangoContext *ctx = pango_font_map_create_context(map);
+    if (!ctx) return;
+    PangoFontDescription *desc = pango_font_description_from_string("emoji");
+    pango_font_description_set_absolute_size(desc, EMOJI_CELL * PANGO_SCALE);
+    g_emoji_font = pango_context_load_font(ctx, desc);
+    pango_font_description_free(desc);
+    g_object_unref(ctx);
+    /* Trust the probe only when the resolved font really is an emoji font. */
+    g_emoji_font_usable = g_emoji_font && pango_font_has_char(g_emoji_font, 0x1F600);
+}
+
+static gboolean glyph_supported(const char *glyph) {
+    probe_emoji_font();
+    if (!g_emoji_font_usable) return TRUE;
+    for (const char *p = glyph; *p; ) {
+        gunichar cp = g_utf8_get_char(p);
+        p = g_utf8_next_char(p);
+        /* Selectors and joiners have no glyph of their own. */
+        if (cp == 0x200D || cp == 0xFE0E || cp == 0xFE0F) continue;
+        if (!pango_font_has_char(g_emoji_font, cp)) return FALSE;
+    }
+    return TRUE;
+}
+
+/* The character when the font can draw it, otherwise a dimmed broken-image
+ * icon. The cell still copies the exact sequence, so a client with a newer
+ * font renders it correctly. */
+static GtkWidget *glyph_visual(const char *glyph, gboolean is_emoji) {
+    if (!is_emoji || glyph_supported(glyph)) return gtk_label_new(glyph);
+    g_missing_glyphs++;
+    GtkWidget *img = gtk_image_new_from_icon_name("image-missing-symbolic");
+    gtk_widget_set_opacity(img, 0.4);
+    return img;
+}
+
+static void set_glyph_tooltip(GtkWidget *btn, const char *glyph, const char *name) {
+    const char *label = (name && *name) ? name : glyph;
+    if (glyph_supported(glyph)) {
+        gtk_widget_set_tooltip_text(btn, label);
+        return;
+    }
+    char *text = g_strdup_printf(
+        "%s\nThis sequence is newer than the installed emoji font; it copies correctly anyway.",
+        label);
+    gtk_widget_set_tooltip_text(btn, text);
+    g_free(text);
+}
+
 /* Provider plumbing: the UI never synthesises a variant sequence. */
 #define GLYPH_VARIANT_SEP "\x1F"
 #define GLYPH_VARIANT_BUF 512
@@ -799,14 +863,13 @@ void super_v_ui_add_glyph_item(const char *tab, const char *glyph, const char *n
     gboolean has_variants = is_emoji && skin_tone_capable;
 
     GtkWidget *btn = gtk_button_new();
-    gtk_widget_set_tooltip_text(btn, name ? name : glyph);
+    set_glyph_tooltip(btn, glyph, name);
     gtk_widget_add_css_class(btn, "flat");
     gtk_widget_add_css_class(btn, is_emoji ? "emoji-cell" : "symbol-cell");
     gtk_widget_set_size_request(btn, is_emoji ? EMOJI_CELL : SYMBOL_CELL, is_emoji ? EMOJI_CELL : SYMBOL_CELL);
 
     GtkWidget *overlay = gtk_overlay_new();
-    GtkWidget *label = gtk_label_new(glyph);
-    gtk_overlay_set_child(GTK_OVERLAY(overlay), label);
+    gtk_overlay_set_child(GTK_OVERLAY(overlay), glyph_visual(glyph, is_emoji));
 
     if (has_variants) {
         GtkWidget *dot = gtk_label_new("\u2022");
@@ -854,7 +917,9 @@ void super_v_ui_clear_glyphs(const char *tab) {
 void super_v_ui_record_recent(const char *type, const char *content) {
     (void)type;
     if (!g_recent_emoji_flow || !content) return;
-    GtkWidget *btn = gtk_button_new_with_label(content);
+    GtkWidget *btn = gtk_button_new();
+    gtk_button_set_child(GTK_BUTTON(btn), glyph_visual(content, TRUE));
+    set_glyph_tooltip(btn, content, NULL);
     gtk_widget_add_css_class(btn, "flat");
     gtk_widget_add_css_class(btn, "emoji-cell");
     gtk_widget_set_size_request(btn, EMOJI_CELL, EMOJI_CELL);
@@ -1875,6 +1940,7 @@ static gboolean run_selftest(gpointer data) {
         char buf[GLYPH_VARIANT_BUF];
         buf[0] = 0;
         int len = g_variants_provider ? g_variants_provider(man_teacher, buf, (int)sizeof(buf)) : -1;
+        printf("VERIFY: missing_glyph_cells=%d\n", g_missing_glyphs);
         printf("VERIFY: variant_ok=%s\n", len > 0 ? "yes" : "no");
         if (len > 0) {
             int count = 1;

@@ -204,7 +204,14 @@ their SHA-256 digests. The generated `data/glyphs/emojis.json` and
 Indonesian annotation yet. They still carry English names and curated keywords;
 regenerating against a newer CLDR fills them in.
 - Emoji rendering depends on the system colour-emoji font (Noto Color Emoji).
-The app does not bundle fonts or SVG glyphs.
+The app does not bundle fonts or SVG glyphs. Ubuntu ships 2.051, which covers
+Emoji 15.1, so the 9 base sequences introduced later (U+1F6D9, U+1FA8B,
+U+1FA8C, U+1FA8D, U+1FACC, U+1FADD, U+1FAEB, U+1FAF9, U+1FAFA) have no glyph in
+it. The picker probes the emoji font once at startup and draws a dimmed
+broken-image placeholder for those cells instead of Pango's hex tofu; they stay
+searchable and paste the exact sequence, so a client with a newer font renders
+them correctly. Installing a newer colour font and restarting the UI replaces
+the placeholders automatically.
 - The dataset intentionally excludes unqualified and minimally-qualified forms,
 standalone components, and non-RGI combinations. A sequence missing from the
 picker is missing for the same reason.
