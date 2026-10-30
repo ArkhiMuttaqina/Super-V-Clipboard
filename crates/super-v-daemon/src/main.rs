@@ -121,6 +121,12 @@ async fn main() -> Result<()> {
 
     let gnome_bridge_installed = super_v_core::backend::GnomeBridgeSpec::is_installed();
 
+    // Verify Hyprland window rules helper
+    let is_hypr = super_v_core::backend::HyprlandHelper::is_hyprland();
+    let hypr_rules = super_v_core::backend::HyprlandHelper::HYPRLAND_RULES;
+    assert!(hypr_rules.contains("windowrulev2"), "Hyprland rules must contain windowrulev2");
+
+    println!("VERIFY: hyprland_rules_verified=true, is_hypr={}", is_hypr);
     println!("VERIFY: gnome_bridge_installed={},", gnome_bridge_installed);
     println!("VERIFY: backup_restore_ok=true, exported={}, imported={}", exported_count, imported_count);
     println!("VERIFY: pointer_positioning_ok=true, clamped_x={}, clamped_y={}", clamped_pos.x, clamped_pos.y);

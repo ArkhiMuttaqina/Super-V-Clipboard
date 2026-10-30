@@ -64,3 +64,20 @@ impl GnomeBridgeSpec {
         }
     }
 }
+
+/// Hyprland and Sway configuration helper
+pub struct HyprlandHelper;
+
+impl HyprlandHelper {
+    pub const HYPRLAND_RULES: &'static str = r#"
+# Super-V Clipboard Window Rules
+windowrulev2 = float, class:(org.darulfalah.SuperVClipboard)
+windowrulev2 = center, class:(org.darulfalah.SuperVClipboard)
+windowrulev2 = stayfocused, class:(org.darulfalah.SuperVClipboard)
+bind = SUPER, V, exec, super-v-ui
+"#;
+
+    pub fn is_hyprland() -> bool {
+        std::env::var("HYPRLAND_INSTANCE_SIGNATURE").is_ok()
+    }
+}
