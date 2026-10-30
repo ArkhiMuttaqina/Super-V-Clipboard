@@ -1,4 +1,3 @@
-pub mod clipboard_poller;
 pub mod ipc;
 pub mod keyboard_injector;
 
@@ -10,7 +9,6 @@ use super_v_core::{
     ipc_client::IpcClient,
     Database,
 };
-use crate::clipboard_poller::ClipboardPoller;
 use crate::ipc::server::IpcServer;
 
 #[tokio::main]
@@ -77,10 +75,6 @@ async fn main() -> Result<()> {
         format!("{}/.local/share/super-v-clipboard/blobs", home)
     };
     let blob_store = Arc::new(super_v_core::BlobStore::new(&blob_dir)?);
-
-    // Start background real-time clipboard poller
-    let poller = Arc::new(ClipboardPoller::new(Arc::clone(&db), Arc::clone(&blob_store)));
-    poller.start_polling();
 
     // Standard IPC socket path
     let socket_path = if is_test_run {

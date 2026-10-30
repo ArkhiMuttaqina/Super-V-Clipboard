@@ -1,10 +1,16 @@
 {
   "uuid": "super-v-bridge@arkhimuttaqina.my.id",
   "name": "Super-V Clipboard Bridge",
-  "description": "Ultra-lightweight clipboard owner-changed event bridge for Super-V Clipboard (GNOME 50, 51.1+ Wayland). Emits DBus signals to super-v-daemon.",
+  "description": "Zero-flicker native in-process clipboard bridge for GNOME 50/51.",
   "shell-version": [
+    "45",
+    "46",
+    "47",
+    "48",
+    "49",
     "50",
     "51"
   ],
-  "url": "https://github.com/GNOME/gnome-shell/tree/51.1"
+  "version": 1,
+  "url": "https://arkhimuttaqina.my.id"
 }
