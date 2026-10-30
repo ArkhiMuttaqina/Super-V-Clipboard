@@ -5,3 +5,5 @@ Cargo.lock
 *.sqlite-shm
 blobs/
 .omp/
+__pycache__/
+*.pyc
