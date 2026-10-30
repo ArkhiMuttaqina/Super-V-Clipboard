@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompositorType {
     GnomeWayland,
     HyprlandWlroots,
@@ -42,4 +43,24 @@ pub trait ClipboardBackend: Send + Sync {
 
     /// Capture pointer position for overlay placement
     fn get_pointer_position(&self) -> Option<(i32, i32)>;
+}
+
+/// GNOME 50/51 Shell Bridge constants
+pub struct GnomeBridgeSpec;
+
+impl GnomeBridgeSpec {
+    pub const DBUS_NAME: &'static str = "org.darulfalah.SuperVBridge";
+    pub const DBUS_PATH: &'static str = "/org/darulfalah/SuperVBridge";
+    pub const EXTENSION_UUID: &'static str = "super-v-bridge@darulfalah.org";
+
+    pub fn is_installed() -> bool {
+        if let Ok(home) = std::env::var("HOME") {
+            let path = std::path::PathBuf::from(home)
+                .join(".local/share/gnome-shell/extensions")
+                .join(Self::EXTENSION_UUID);
+            path.exists()
+        } else {
+            false
+        }
+    }
 }

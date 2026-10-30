@@ -7,6 +7,7 @@ extern "C" {
 
 int super_v_x11_is_available(void);
 int super_v_x11_fake_paste(void);
+int super_v_x11_listen_clipboard_events(void (*on_changed)(void));
 
 #ifdef __cplusplus
 }

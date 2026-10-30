@@ -119,6 +119,9 @@ async fn main() -> Result<()> {
     assert!(clamped_pos.x + 420 <= 1920, "Clamped X must fit monitor");
     assert!(clamped_pos.y + 520 <= 1080, "Clamped Y must fit monitor");
 
+    let gnome_bridge_installed = super_v_core::backend::GnomeBridgeSpec::is_installed();
+
+    println!("VERIFY: gnome_bridge_installed={},", gnome_bridge_installed);
     println!("VERIFY: backup_restore_ok=true, exported={}, imported={}", exported_count, imported_count);
     println!("VERIFY: pointer_positioning_ok=true, clamped_x={}, clamped_y={}", clamped_pos.x, clamped_pos.y);
     println!("VERIFY: full_glyphs_embedded=true, emojis=1914, kaomojis=83, symbols=1073");

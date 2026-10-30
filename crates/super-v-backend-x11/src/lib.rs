@@ -1,10 +1,12 @@
-//! Native X11 Backend with C FFI for XTest synthetic keypress injection.
+//! Native X11 Backend with C FFI for XTest synthetic keypress injection and XFixes clipboard monitoring.
 
 use anyhow::{anyhow, Result};
 
+#[allow(dead_code)]
 extern "C" {
     fn super_v_x11_is_available() -> libc::c_int;
     fn super_v_x11_fake_paste() -> libc::c_int;
+    fn super_v_x11_listen_clipboard_events(cb: extern "C" fn()) -> libc::c_int;
 }
 
 pub struct X11Backend;
@@ -27,5 +29,9 @@ impl X11Backend {
             }
         }
         Ok(())
+    }
+
+    pub fn is_available() -> bool {
+        unsafe { super_v_x11_is_available() == 1 }
     }
 }
