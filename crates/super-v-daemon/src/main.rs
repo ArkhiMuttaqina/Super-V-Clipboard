@@ -1,4 +1,5 @@
 pub mod ipc;
+pub mod shot_watch;
 pub mod keyboard_injector;
 
 use anyhow::Result;
@@ -62,6 +63,10 @@ async fn main() -> Result<()> {
             log::error!("IPC server failure: {:?}", e);
         }
     });
+
+    if !is_test_run {
+        shot_watch::spawn(Arc::clone(&db), Arc::clone(&blob_store));
+    }
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 

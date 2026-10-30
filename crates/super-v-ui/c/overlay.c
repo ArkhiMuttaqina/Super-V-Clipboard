@@ -1837,6 +1837,8 @@ static void on_image_stream_ready(GObject *source, GAsyncResult *res, gpointer d
     g_byte_array_free(bytes, TRUE);
 
     if (g_image_hook) g_image_hook(path, mime);
+    /* the row only exists after the daemon stored it */
+    g_timeout_add(400, refresh_history_idle, NULL);
     g_free(mime);
 }
 
