@@ -53,10 +53,7 @@ static guint g_idle_exit_source = 0;
 static gboolean g_loading_page = FALSE;
 static gboolean g_setting_entry = FALSE;
 static gboolean g_setting_combo = FALSE;
-static GtkWidget *g_fixed = NULL;
-static GtkWidget *g_card = NULL;
 static int g_placement_pointer = 0;
-static int g_place_retries = 0;
 static PlacementHook g_placement_hook = NULL;
 
 static void hide_main_window(void);
@@ -64,8 +61,10 @@ static void cancel_idle_exit(void);
 static void schedule_idle_exit(void);
 static GtkWidget *make_thumb(const char *path, int size);
 static void select_combo(GtkWidget *combo, guint idx);
-static gboolean position_card_idle(gpointer data);
-static void position_card(void);
+static gboolean place_after_map(gpointer data);
+static void sync_clipboard_once(void);
+static gboolean sync_clipboard_idle(gpointer data);
+static void request_pointer_placement(void);
 static void on_placement_changed(GObject *obj, GParamSpec *pspec, gpointer user_data);
 static void reload_glyphs(const char *tab);
 
@@ -114,7 +113,10 @@ static void on_clipboard_text_ready(GObject *source, GAsyncResult *res, gpointer
     GError *err = NULL;
     char *text = gdk_clipboard_read_text_finish(GDK_CLIPBOARD(source), res, &err);
     if (!text) {
-        if (err) g_error_free(err);
+        if (err) {
+            if (g_getenv("SUPER_V_DEBUG_CLIPBOARD")) g_printerr("CLIP read failed: %s\n", err->message);
+            g_error_free(err);
+        }
         return;
     }
     if (g_clip_hook && *text) {
@@ -1069,14 +1071,28 @@ static gboolean on_hide_signal(gpointer data) {
     return G_SOURCE_CONTINUE;
 }
 
+static gboolean sync_clipboard_idle(gpointer data) {
+    (void)data;
+    sync_clipboard_once();
+    return G_SOURCE_REMOVE;
+}
+
+static void sync_clipboard_once(void) {
+    GdkDisplay *d = gdk_display_get_default();
+    if (!d) return;
+    GdkClipboard *clip = gdk_display_get_clipboard(d);
+    if (clip) gdk_clipboard_read_text_async(clip, NULL, on_clipboard_text_ready, NULL);
+}
+
 static gboolean on_toggle_signal(gpointer data) {
     (void)data;
     if (!g_main_window) return G_SOURCE_CONTINUE;
     cancel_idle_exit();
     gtk_widget_set_visible(g_main_window, TRUE);
     gtk_window_present(GTK_WINDOW(g_main_window));
-    g_timeout_add(60, position_card_idle, NULL);
+    g_timeout_add(60, place_after_map, NULL);
     gtk_widget_grab_focus(g_search_entry);
+    g_timeout_add(200, sync_clipboard_idle, NULL);
     return G_SOURCE_CONTINUE;
 }
 
@@ -1217,145 +1233,54 @@ static const GActionEntry app_entries[] = {
     { "about", on_about_action, NULL, NULL, NULL },
 };
 
-/* ---- Global pointer fallback -------------------------------------------------
- * A Wayland client cannot query the pointer until it has received motion over
- * its own surface, so a freshly presented overlay reports -1,-1. XWayland keeps
- * the X pointer in sync with the compositor cursor, so we read it through
- * libX11 (dlopen, no hard link) and convert global to surface coordinates.
+/* ------------------------------------------------------ window placement
+ * A Wayland client cannot position a toplevel, and a transparent fullscreen
+ * hack looks wrong. The shell can move windows, so the GNOME extension
+ * (super-v-bridge) exports MoveWindowToCursor and we call it after showing.
+ * Without the extension the window simply stays where Mutter put it.
  */
-#include <dlfcn.h>
 
-typedef struct _XDisplay SuperVXDisplay;
-typedef unsigned long SuperVXWindow;
-
-typedef SuperVXDisplay *(*XOpenDisplayFn)(const char *);
-typedef SuperVXWindow (*XDefaultRootWindowFn)(SuperVXDisplay *);
-typedef int (*XQueryPointerFn)(SuperVXDisplay *, SuperVXWindow, SuperVXWindow *, SuperVXWindow *, int *, int *, int *, int *, unsigned int *);
-
-static gboolean x11_query_pointer(int *out_x, int *out_y) {
-    static gboolean tried = FALSE;
-    static XOpenDisplayFn p_open = NULL;
-    static XDefaultRootWindowFn p_root = NULL;
-    static XQueryPointerFn p_query = NULL;
-    static SuperVXDisplay *display = NULL;
-
-    if (!tried) {
-        tried = TRUE;
-        void *lib = dlopen("libX11.so.6", RTLD_LAZY);
-        if (lib) {
-            p_open = (XOpenDisplayFn)dlsym(lib, "XOpenDisplay");
-            p_root = (XDefaultRootWindowFn)dlsym(lib, "XDefaultRootWindow");
-            p_query = (XQueryPointerFn)dlsym(lib, "XQueryPointer");
-        }
-    }
-    if (!p_open || !p_root || !p_query) return FALSE;
-
-    if (!display) {
-        display = p_open(NULL);
-        if (!display) return FALSE;
-    }
-
-    SuperVXWindow root = p_root(display);
-    SuperVXWindow root_ret = 0, child_ret = 0;
-    int root_x = 0, root_y = 0, win_x = 0, win_y = 0;
-    unsigned int mask = 0;
-    if (!p_query(display, root, &root_ret, &child_ret, &root_x, &root_y, &win_x, &win_y, &mask)) {
-        return FALSE;
-    }
-    *out_x = root_x;
-    *out_y = root_y;
-    return TRUE;
-}
-
-static void position_card(void) {
-    gboolean dbg = g_getenv("SUPER_V_DEBUG_PLACEMENT") != NULL;
-    if (dbg) g_printerr("PLACE enter win=%p fixed=%p card=%p ptr_mode=%d\n", (void*)g_main_window, (void*)g_fixed, (void*)g_card, g_placement_pointer);
-    if (!g_main_window || !g_fixed || !g_card) return;
-    GtkWindow *win = GTK_WINDOW(g_main_window);
-
-    if (!g_placement_pointer) {
-        if (gtk_window_is_fullscreen(win)) gtk_window_unfullscreen(win);
-        gtk_window_set_resizable(win, FALSE);
-        gtk_window_set_default_size(win, 420, 520);
-        gtk_fixed_move(GTK_FIXED(g_fixed), g_card, 0, 0);
-        return;
-    }
-
-    gtk_window_set_resizable(win, TRUE);
-    if (!gtk_window_is_fullscreen(win)) gtk_window_fullscreen(win);
-    GdkSurface *surf = gtk_native_get_surface(GTK_NATIVE(g_main_window));
-    if (!surf) { if (dbg) g_printerr("PLACE no surface\n"); return; }
-    int sw = gdk_surface_get_width(surf);
-    int sh = gdk_surface_get_height(surf);
-    if (dbg) g_printerr("PLACE surface=%dx%d fs=%d\n", sw, sh, gtk_window_is_fullscreen(win));
-    GdkMonitor *surf_mon = gdk_display_get_monitor_at_surface(gdk_surface_get_display(surf), surf);
-    int mon_w = 0, mon_h = 0;
-    if (surf_mon) {
-        GdkRectangle mg;
-        gdk_monitor_get_geometry(surf_mon, &mg);
-        mon_w = mg.width;
-        mon_h = mg.height;
-    }
-    if (sw <= 1 || sh <= 1 || (mon_w > 0 && (sw < mon_w - 2 || sh < mon_h - 2))) {
-        if (g_place_retries++ < 40) g_timeout_add(25, position_card_idle, NULL);
-        return;
-    }
-
-    double px = -1, py = -1;
-    GdkDisplay *dpy = gdk_surface_get_display(surf);
-    GdkSeat *seat = gdk_display_get_default_seat(dpy);
-    GdkDevice *ptr = seat ? gdk_seat_get_pointer(seat) : NULL;
-    if (ptr) {
-        GdkModifierType mask = 0;
-        gdk_surface_get_device_position(surf, ptr, &px, &py, &mask);
-    }
-    if (px < 0 || py < 0) {
-        int gx = 0, gy = 0;
-        if (x11_query_pointer(&gx, &gy)) {
-            GdkMonitor *mon = gdk_display_get_monitor_at_surface(dpy, surf);
-            if (mon) {
-                GdkRectangle geo;
-                gdk_monitor_get_geometry(mon, &geo);
-                px = gx - geo.x;
-                py = gy - geo.y;
-            }
-        }
-    }
-
-    if (px < 0 || py < 0) {
-        if (g_place_retries++ < 40) g_timeout_add(25, position_card_idle, NULL);
-        return;
-    }
-    g_place_retries = 0;
-
-    const int gap = 12;
-    int x = (int)px + 18;
-    int y = (int)py + 18;
-    if (x + 420 + gap > sw) x = (int)px - 420 - 18;
-    if (y + 520 + gap > sh) y = (int)py - 520 - 18;
-    if (x < gap) x = gap;
-    if (y < gap) y = gap;
-    if (x > sw - 420 - gap) x = sw - 420 - gap;
-    if (y > sh - 520 - gap) y = sh - 520 - gap;
-
-    gtk_fixed_move(GTK_FIXED(g_fixed), g_card, x, y);
-    if (g_getenv("SUPER_V_DEBUG_PLACEMENT")) {
-        g_printerr("PLACE fullscreen=%d surface=%dx%d pointer=%.0f,%.0f card=%d,%d\n",
-            gtk_window_is_fullscreen(win), sw, sh, px, py, x, y);
-    }
-}
-
-static gboolean position_card_idle(gpointer data) {
+static void on_move_window_reply(GObject *source, GAsyncResult *res, gpointer data) {
     (void)data;
-    position_card();
-    return G_SOURCE_REMOVE;
+    GError *err = NULL;
+    GVariant *reply = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source), res, &err);
+    if (reply) {
+        g_variant_unref(reply);
+        if (g_getenv("SUPER_V_DEBUG_PLACEMENT")) g_printerr("PLACE moved by shell extension\n");
+    } else {
+        if (g_getenv("SUPER_V_DEBUG_PLACEMENT")) g_printerr("PLACE extension unavailable: %s\n", err ? err->message : "?");
+        if (err) g_error_free(err);
+    }
+}
+
+static void request_pointer_placement(void) {
+    if (!g_placement_pointer || !g_main_window) return;
+    GError *err = NULL;
+    GDBusConnection *bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, &err);
+    if (!bus) {
+        if (err) g_error_free(err);
+        return;
+    }
+    g_dbus_connection_call(
+        bus,
+        "my.id.arkhimuttaqina.Bridge",
+        "/my/id/arkhimuttaqina/Bridge",
+        "my.id.arkhimuttaqina.Bridge",
+        "MoveWindowToCursor",
+        g_variant_new("(s)", "Super-V Clipboard"),
+        NULL,
+        G_DBUS_CALL_FLAGS_NONE,
+        400,
+        NULL,
+        on_move_window_reply,
+        NULL);
+    g_object_unref(bus);
 }
 
 void super_v_ui_set_placement(const char *mode) {
     g_placement_pointer = (mode && strcmp(mode, "pointer") == 0);
-    g_place_retries = 0;
     if (g_main_window && gtk_widget_get_visible(g_main_window)) {
-        position_card();
+        request_pointer_placement();
     }
 }
 
@@ -1366,28 +1291,20 @@ static void on_placement_changed(GObject *obj, GParamSpec *pspec, gpointer user_
     const char *mode = (idx == 1) ? "pointer" : "center";
     g_placement_pointer = (idx == 1);
     if (g_placement_hook) g_placement_hook(mode);
-    position_card();
+    request_pointer_placement();
 }
 
-static void on_background_click(GtkGestureClick *gesture, int n_press, double x, double y, gpointer data) {
-    (void)n_press; (void)data;
-    if (!g_placement_pointer || !g_card) return;
-    graphene_rect_t bounds;
-    if (!gtk_widget_compute_bounds(g_card, GTK_WIDGET(g_main_window), &bounds)) return;
-    gboolean inside = x >= bounds.origin.x && y >= bounds.origin.y &&
-        x <= bounds.origin.x + bounds.size.width && y <= bounds.origin.y + bounds.size.height;
-    if (!inside) {
-        hide_main_window();
-        gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
-    }
+static gboolean place_after_map(gpointer data) {
+    (void)data;
+    request_pointer_placement();
+    return G_SOURCE_REMOVE;
 }
 
 static GtkWidget *create_main_window(AdwApplication *app) {
     GtkWidget *window = adw_application_window_new(GTK_APPLICATION(app));
     gtk_window_set_title(GTK_WINDOW(window), "Super-V Clipboard");
     gtk_window_set_default_size(GTK_WINDOW(window), 420, 520);
-    /* Resizable so the pointer-placement mode can expand to a fullscreen surface. */
-    gtk_window_set_resizable(GTK_WINDOW(window), TRUE);
+    gtk_window_set_resizable(GTK_WINDOW(window), FALSE);
     g_signal_connect(window, "close-request", G_CALLBACK(on_close_request), NULL);
 
     GtkEventController *key_ctrl = gtk_event_controller_key_new();
@@ -1395,23 +1312,7 @@ static GtkWidget *create_main_window(AdwApplication *app) {
     gtk_widget_add_controller(window, key_ctrl);
 
     GtkWidget *main_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_widget_add_css_class(main_box, "superv-card");
-    gtk_widget_set_size_request(main_box, 420, 520);
-    g_card = main_box;
-
-    g_fixed = gtk_fixed_new();
-    adw_application_window_set_content(ADW_APPLICATION_WINDOW(window), g_fixed);
-    gtk_fixed_put(GTK_FIXED(g_fixed), main_box, 0, 0);
-
-    GtkGesture *bg_click = gtk_gesture_click_new();
-    gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(bg_click), GTK_PHASE_CAPTURE);
-    g_signal_connect(bg_click, "pressed", G_CALLBACK(on_background_click), NULL);
-    gtk_widget_add_controller(window, GTK_EVENT_CONTROLLER(bg_click));
-
-    if (g_placement_pointer) {
-        gtk_widget_add_css_class(window, "superv-overlay");
-    }
-
+    adw_application_window_set_content(ADW_APPLICATION_WINDOW(window), main_box);
 
     g_stack = adw_view_stack_new();
     gtk_widget_set_vexpand(g_stack, TRUE);
@@ -1562,15 +1463,16 @@ static void on_app_activate(GtkApplication *app, gpointer user_data) {
         cancel_idle_exit();
         gtk_widget_set_visible(g_main_window, TRUE);
         gtk_window_present(GTK_WINDOW(g_main_window));
-    g_timeout_add(60, position_card_idle, NULL);
+    g_timeout_add(60, place_after_map, NULL);
         return;
     }
 
     install_css();
     g_main_window = create_main_window(ADW_APPLICATION(app));
     gtk_window_present(GTK_WINDOW(g_main_window));
-    g_timeout_add(60, position_card_idle, NULL);
+    g_timeout_add(60, place_after_map, NULL);
     gtk_widget_grab_focus(g_search_entry);
+    g_timeout_add(200, sync_clipboard_idle, NULL);
 
     if (g_activate_hook) g_activate_hook();
 

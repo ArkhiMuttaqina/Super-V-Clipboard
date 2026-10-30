@@ -1,0 +1,9 @@
+[package]
+name = "super-v-ingest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+super-v-core = { path = "../super-v-core" }
+tokio.workspace = true

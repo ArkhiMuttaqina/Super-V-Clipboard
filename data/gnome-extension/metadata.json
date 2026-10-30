@@ -1,7 +1,7 @@
 {
   "uuid": "super-v-bridge@arkhimuttaqina.my.id",
   "name": "Super-V Clipboard Bridge",
-  "description": "Zero-flicker native in-process clipboard bridge for GNOME 50/51.",
+  "description": "Positions the Super-V overlay next to the pointer (and hands it focus). Wayland clients cannot move their own toplevels; the Shell can.",
   "shell-version": [
     "45",
     "46",
@@ -11,6 +11,6 @@
     "50",
     "51"
   ],
-  "version": 1,
-  "url": "https://arkhimuttaqina.my.id"
+  "version": 2,
+  "url": "https://github.com/ArkhiMuttaqina/Super-V-Clipboard"
 }
