@@ -34,6 +34,36 @@ static void on_row_activated(GtkListBox *box, GtkListBoxRow *row, gpointer user_
     }
 }
 
+static gboolean on_window_key_pressed(GtkEventControllerKey *controller,
+                                      guint keyval,
+                                      guint keycode,
+                                      GdkModifierType state,
+                                      gpointer user_data) {
+    (void)controller;
+    (void)keycode;
+    GtkWindow *window = GTK_WINDOW(user_data);
+
+    // Escape closes window
+    if (keyval == GDK_KEY_Escape) {
+        gtk_window_close(window);
+        return TRUE;
+    }
+
+    // Ctrl+W or Ctrl+Q closes window
+    if ((state & GDK_CONTROL_MASK) && (keyval == GDK_KEY_w || keyval == GDK_KEY_q)) {
+        gtk_window_close(window);
+        return TRUE;
+    }
+
+    // F1 or Ctrl+, opens Settings Preferences Dialog
+    if (keyval == GDK_KEY_F1 || ((state & GDK_CONTROL_MASK) && keyval == GDK_KEY_comma)) {
+        super_v_ui_show_settings((void*)window);
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
 static gboolean clip_list_filter_func(GtkListBoxRow *row, gpointer user_data) {
     GtkSearchEntry *entry = GTK_SEARCH_ENTRY(user_data);
     const char *query = gtk_editable_get_text(GTK_EDITABLE(entry));
@@ -182,6 +212,11 @@ static GtkWidget* create_main_window(AdwApplication *app) {
     gtk_window_set_title(GTK_WINDOW(window), "Super-V Clipboard");
     gtk_window_set_default_size(GTK_WINDOW(window), 440, 560);
 
+    // Attach Keyboard Event Controller (Esc, Ctrl+W, Ctrl+Q, F1)
+    GtkEventController *key_ctrl = gtk_event_controller_key_new();
+    g_signal_connect(key_ctrl, "key-pressed", G_CALLBACK(on_window_key_pressed), window);
+    gtk_widget_add_controller(window, key_ctrl);
+
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     adw_application_window_set_content(ADW_APPLICATION_WINDOW(window), box);
 
@@ -191,7 +226,7 @@ static GtkWidget* create_main_window(AdwApplication *app) {
 
     // Settings Button in HeaderBar
     GtkWidget *settings_btn = gtk_button_new_from_icon_name("preferences-system-symbolic");
-    gtk_widget_set_tooltip_text(settings_btn, "Preferences & Diagnostics");
+    gtk_widget_set_tooltip_text(settings_btn, "Preferences & Diagnostics (F1)");
     g_signal_connect(settings_btn, "clicked", G_CALLBACK(on_settings_clicked), window);
     adw_header_bar_pack_end(ADW_HEADER_BAR(header), settings_btn);
 
