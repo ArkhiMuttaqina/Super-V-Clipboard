@@ -149,8 +149,13 @@ static void emit_paste(long long id, const char *text) {
     if (g_paste_cb) g_paste_cb(id, text);
 }
 
+static gint64 g_last_pick_us = 0;
+
 static void on_history_row_activated(AdwActionRow *row, gpointer data) {
     (void)data;
+    gint64 now = g_get_monotonic_time();
+    if (now - g_last_pick_us < 300000) return;   /* one pick per gesture */
+    g_last_pick_us = now;
     const char *text = (const char *)g_object_get_data(G_OBJECT(row), "super_v_text");
     if (text && *text) {
         paste_after_hide(text);
@@ -362,6 +367,7 @@ typedef struct { char *text; } PasteAction;
 
 static gboolean do_paste_action(gpointer data) {
     PasteAction *action = (PasteAction *)data;
+    if (g_getenv("SUPER_V_DEBUG_INSERT")) g_printerr("PASTE dispatch now\n");
     simulate_paste();
     restore_clipboard_later();
     g_free(action->text);
@@ -374,6 +380,7 @@ static void on_clipboard_captured_for_paste(GObject *source, GAsyncResult *res, 
     char *previous = gdk_clipboard_read_text_finish(GDK_CLIPBOARD(source), res, &err);
     if (err) g_error_free(err);
 
+    if (g_getenv("SUPER_V_DEBUG_INSERT")) g_printerr("PASTE captured previous=[%.40s]\n", previous ? previous : "(none)");
     g_free(g_saved_clip);
     g_saved_clip = previous;
 
@@ -388,6 +395,7 @@ static void on_clipboard_captured_for_paste(GObject *source, GAsyncResult *res, 
         gdk_clipboard_set_text(gdk_display_get_clipboard(d), action->text);
     }
 
+    if (g_getenv("SUPER_V_DEBUG_INSERT")) g_printerr("PASTE clipboard set to [%.40s], hiding\n", action->text);
     hide_main_window();
     g_timeout_add(90, do_paste_action, action);
 }
@@ -417,7 +425,7 @@ static gboolean restore_clipboard_now(gpointer data) {
 static void restore_clipboard_later(void) {
     if (!g_saved_clip) return;
     if (g_restore_source) g_source_remove(g_restore_source);
-    g_restore_source = g_timeout_add(500, restore_clipboard_now, NULL);
+    g_restore_source = g_timeout_add(800, restore_clipboard_now, NULL);
 }
 
 static void simulate_paste(void) {
@@ -1325,6 +1333,20 @@ static gboolean g_application_quit_wrapper(gpointer data) {
     return G_SOURCE_REMOVE;
 }
 
+static gboolean selftest_activate_row(gpointer data) {
+    (void)data;
+    GtkListBoxRow *first = NULL;
+    if (g_clip_list) first = gtk_list_box_get_row_at_index(GTK_LIST_BOX(g_clip_list), 0);
+    if (first) {
+        g_signal_emit_by_name(first, "activated");
+        printf("VERIFY: row_activated=true\n");
+    } else {
+        printf("VERIFY: row_activated=false\n");
+    }
+    fflush(stdout);
+    return G_SOURCE_REMOVE;
+}
+
 static gboolean run_selftest(gpointer data) {
     (void)data;
 
@@ -1393,15 +1415,9 @@ static gboolean run_selftest(gpointer data) {
         printf("VERIFY: api_key_hook_called=true\n");
     }
     if (g_getenv("SUPER_V_SELFTEST_ROW")) {
-        GtkListBoxRow *first = gtk_list_box_get_row_at_index(GTK_LIST_BOX(g_clip_list), 0);
-        if (first) {
-            g_signal_emit_by_name(g_clip_list, "row-activated", first);
-            printf("VERIFY: row_activated=true\n");
-            fflush(stdout);
-        } else {
-            printf("VERIFY: row_activated=false\n");
-            fflush(stdout);
-        }
+        g_timeout_add(1500, selftest_activate_row, NULL);
+        g_timeout_add(6000, g_application_quit_wrapper, NULL);
+        return G_SOURCE_REMOVE;
     }
     if (g_getenv("SUPER_V_SELFTEST_PASTE")) {
         super_v_ui_paste_text("PASTE-TEST-VALUE");
@@ -1570,7 +1586,6 @@ static GtkWidget *create_main_window(AdwApplication *app) {
     gtk_widget_set_margin_start(g_clip_list, 10);
     gtk_widget_set_margin_end(g_clip_list, 10);
     gtk_widget_set_margin_bottom(g_clip_list, 10);
-    g_signal_connect(g_clip_list, "row-activated", G_CALLBACK(on_row_activated), NULL);
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(clip_scroll), g_clip_list);
     adw_view_stack_add_titled_with_icon(ADW_VIEW_STACK(g_stack), clip_scroll, "clipboard", "Clipboard", "edit-paste-symbolic");
 
