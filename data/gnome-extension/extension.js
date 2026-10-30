@@ -8,6 +8,7 @@
 // The placement technique mirrors Clipman's MoveWindowToCursor.
 
 import Gio from 'gi://Gio';
+import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
 import Meta from 'gi://Meta';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
@@ -19,6 +20,9 @@ const IFACE_XML = `
   <interface name="my.id.arkhimuttaqina.Bridge">
     <method name="MoveWindowToCursor">
       <arg type="s" name="title" direction="in"/>
+    </method>
+    <method name="InsertText">
+      <arg type="s" name="text" direction="in"/>
     </method>
     <method name="Ping">
       <arg type="s" name="reply" direction="out"/>
@@ -144,7 +148,52 @@ export default class SuperVBridgeExtension extends Extension {
         }
     }
 
+    // ---- typed insertion ------------------------------------------------
+
+    InsertTextAsync([text], invocation) {
+        try {
+            this._insertText(text);
+            invocation.return_value(null);
+        } catch (e) {
+            invocation.return_dbus_error(
+                'my.id.arkhimuttaqina.Bridge.Error', e.message);
+        }
+    }
+
+    // Types the string through a virtual keyboard so the clipboard is never
+    // touched: picking an emoji no longer overwrites what you copied.
+    _insertText(text) {
+        if (!text)
+            return;
+        const seat = Clutter.get_default_backend().get_default_seat();
+        const device = seat.create_virtual_device(
+            Clutter.InputDeviceType.KEYBOARD_DEVICE);
+        if (!device)
+            throw new Error('virtual keyboard unavailable');
+
+        const now = Clutter.CURRENT_TIME;
+        try {
+            for (const ch of text) {
+                const cp = ch.codePointAt(0);
+                let keysym;
+                if (ch === '\n')
+                    keysym = 0xff0d;
+                else if (ch === '\t')
+                    keysym = 0xff09;
+                else if (cp <= 0xffff)
+                    keysym = cp;
+                else
+                    keysym = 0x01000000 + cp;
+                device.notify_keyval(now, keysym, Clutter.KeyState.PRESSED);
+                device.notify_keyval(now, keysym, Clutter.KeyState.RELEASED);
+            }
+        } finally {
+            device.run_dispose();
+        }
+    }
+
     // ---- placement ----------------------------------------------------
+
 
     Ping() {
         return 'pong';

@@ -1,7 +1,7 @@
 {
   "uuid": "super-v-bridge@arkhimuttaqina.my.id",
   "name": "Super-V Clipboard Bridge",
-  "description": "Positions the Super-V overlay next to the pointer (and hands it focus). Wayland clients cannot move their own toplevels; the Shell can.",
+  "description": "Positions the Super-V overlay next to the pointer, hands it focus, and types picks directly into the focused app. Also forwards clipboard changes to the daemon.",
   "shell-version": [
     "45",
     "46",
@@ -11,6 +11,6 @@
     "50",
     "51"
   ],
-  "version": 2,
+  "version": 3,
   "url": "https://github.com/ArkhiMuttaqina/Super-V-Clipboard"
 }

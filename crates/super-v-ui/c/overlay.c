@@ -142,9 +142,15 @@ static void emit_paste(long long id, const char *text) {
 
 static void on_row_activated(GtkListBox *box, GtkListBoxRow *row, gpointer user_data) {
     (void)box; (void)user_data;
+    const char *text = (const char *)g_object_get_data(G_OBJECT(row), "super_v_text");
     gint64 *pid = (gint64 *)g_object_get_data(G_OBJECT(row), "super_v_id");
-    if (!pid) return;
-    emit_paste((long long)*pid, NULL);
+    if (text && *text) {
+        super_v_ui_insert_text(text);
+    } else if (pid) {
+        emit_paste((long long)*pid, NULL);
+    } else {
+        return;
+    }
     hide_main_window();
 }
 
@@ -280,21 +286,58 @@ static GtkWidget *flow_for_tab(const char *tab) {
     return NULL;
 }
 
+/* Insert text into whatever window has focus. The Shell extension owns the
+   virtual keyboard, so the clipboard is never touched by a pick. */
+static void on_insert_reply(GObject *source, GAsyncResult *res, gpointer data) {
+    (void)data;
+    GError *err = NULL;
+    GVariant *reply = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source), res, &err);
+    if (reply) {
+        g_variant_unref(reply);
+        if (g_getenv("SUPER_V_DEBUG_INSERT")) g_printerr("INSERT typed by extension\n");
+    } else {
+        if (g_getenv("SUPER_V_DEBUG_INSERT")) g_printerr("INSERT extension unavailable: %s\n", err ? err->message : "?");
+        if (err) g_error_free(err);
+    }
+}
+
+void super_v_ui_insert_text(const char *text) {
+    if (!text || !*text) return;
+    GError *err = NULL;
+    GDBusConnection *bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, &err);
+    if (!bus) {
+        if (err) g_error_free(err);
+        return;
+    }
+    g_dbus_connection_call(
+        bus,
+        "my.id.arkhimuttaqina.Bridge",
+        "/my/id/arkhimuttaqina/Bridge",
+        "my.id.arkhimuttaqina.Bridge",
+        "InsertText",
+        g_variant_new("(s)", text),
+        NULL,
+        G_DBUS_CALL_FLAGS_NONE,
+        800,
+        NULL,
+        on_insert_reply,
+        NULL);
+    g_object_unref(bus);
+}
+
 static void on_glyph_clicked(GtkButton *btn, gpointer user_data) {
     const char *glyph = (const char *)user_data;
     GtkWidget *child = btn ? gtk_widget_get_parent(GTK_WIDGET(btn)) : NULL;
     GtkWidget *flow = child ? gtk_widget_get_parent(child) : NULL;
     if (flow && flow == g_emoji_flow) super_v_ui_record_recent("emoji", glyph);
-    copy_text_to_clipboard(glyph);
-    emit_paste(0, glyph);
+    super_v_ui_insert_text(glyph);
     hide_main_window();
 }
 
 static void on_skin_variant_clicked(GtkButton *btn, gpointer user_data) {
     (void)btn;
     const char *variant = (const char *)user_data;
-    copy_text_to_clipboard(variant);
-    emit_paste(0, variant);
+    super_v_ui_insert_text(variant);
     hide_main_window();
 }
 
@@ -1087,6 +1130,10 @@ static void sync_clipboard_once(void) {
 static gboolean on_toggle_signal(gpointer data) {
     (void)data;
     if (!g_main_window) return G_SOURCE_CONTINUE;
+    if (gtk_widget_get_visible(g_main_window)) {
+        hide_main_window();
+        return G_SOURCE_CONTINUE;
+    }
     cancel_idle_exit();
     gtk_widget_set_visible(g_main_window, TRUE);
     gtk_window_present(GTK_WINDOW(g_main_window));
@@ -1308,6 +1355,7 @@ static GtkWidget *create_main_window(AdwApplication *app) {
     g_signal_connect(window, "close-request", G_CALLBACK(on_close_request), NULL);
 
     GtkEventController *key_ctrl = gtk_event_controller_key_new();
+    gtk_event_controller_set_propagation_phase(key_ctrl, GTK_PHASE_CAPTURE);
     g_signal_connect(key_ctrl, "key-pressed", G_CALLBACK(on_window_key_pressed), window);
     gtk_widget_add_controller(window, key_ctrl);
 

@@ -40,6 +40,7 @@ void super_v_ui_set_provider_test_hook(ProviderTestHook cb);
 void super_v_ui_set_placement_hook(PlacementHook cb);
 void super_v_ui_set_placement(const char *mode);
 void super_v_ui_set_clipboard_hook(ClipTextHook cb);
+void super_v_ui_insert_text(const char *text);
 
 /* Called from Rust after the hooks are installed, so the C side can reflect
    the persisted preferences in its widgets. */
