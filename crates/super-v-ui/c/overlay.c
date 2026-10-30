@@ -871,7 +871,8 @@ static gboolean run_selftest(gpointer data) {
 
     int gif_count = 0;
     for (GtkWidget *w = gtk_widget_get_first_child(g_gif_flow); w; w = gtk_widget_get_next_sibling(w)) gif_count++;
-    printf("VERIFY: gif_items=%d\n", gif_count);
+    printf("VERIFY: gif_items=%d, hint=%s\n", gif_count,
+        gtk_label_get_text(GTK_LABEL(g_gif_label)));
 
     apply_entry_text("");
     g_query_emoji[0] = 0;
