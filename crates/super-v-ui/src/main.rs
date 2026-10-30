@@ -15,6 +15,7 @@ type LanguageHook = extern "C" fn(langs: *const c_char);
 type GifProviderHook = extern "C" fn(id: *const c_char);
 type GifReloadHook = extern "C" fn();
 type GifSearchHook = extern "C" fn(query: *const c_char);
+type GifMoreHook = extern "C" fn();
 type ApiKeyHook = extern "C" fn(key: *const c_char);
 type ProviderTestHook = extern "C" fn(provider: *const c_char);
 type PlacementHook = extern "C" fn(mode: *const c_char);
@@ -34,6 +35,8 @@ extern "C" {
     fn super_v_ui_set_gif_provider_hook(cb: GifProviderHook);
     fn super_v_ui_set_gif_reload_hook(cb: GifReloadHook);
     fn super_v_ui_set_gif_search_hook(cb: GifSearchHook);
+    fn super_v_ui_set_gif_more_hook(cb: GifMoreHook);
+    fn super_v_ui_post_to_main(fn_: extern "C" fn(data: *mut std::ffi::c_void), data: *mut std::ffi::c_void);
     fn super_v_ui_set_api_key_hook(cb: ApiKeyHook);
     fn super_v_ui_set_provider_test_hook(cb: ProviderTestHook);
     fn super_v_ui_set_placement_hook(cb: PlacementHook);
@@ -175,31 +178,79 @@ fn cache_dir() -> std::path::PathBuf {
     base.join("super-v-clipboard").join("gifs")
 }
 
-/// Download one remote GIF into the cache directory and return its path.
-fn cache_remote_gif(url: &str, provider: &str, index: usize) -> Option<String> {
+/// One cache file per URL: the same GIF seen on two pages resolves to the same
+/// path, so the picker can dedupe by path without re-downloading.
+fn gif_cache_path(provider: &str, url: &str) -> std::path::PathBuf {
     use std::hash::{Hash, Hasher};
-    let dir = cache_dir();
-    let _ = std::fs::create_dir_all(&dir);
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     url.hash(&mut hasher);
-    let dest = dir.join(format!("{}-{}-{}.gif", provider, hasher.finish(), index));
-    if !dest.exists() {
-        let _ = std::process::Command::new("curl")
-            .args(["-sS", "--max-time", "8", "-o", &dest.to_string_lossy(), url])
-            .status();
-        if !dest.exists() {
-            return None;
-        }
-    }
-    if dest.metadata().map(|m| m.len()).unwrap_or(0) == 0 {
-        let _ = std::fs::remove_file(&dest);
-        return None;
-    }
-    Some(dest.to_string_lossy().to_string())
+    cache_dir().join(format!("{}-{}.gif", provider, hasher.finish()))
 }
 
-/// Tenor: featured feed without a query, search with one.
-fn fetch_tenor(api_key: &str, query: &str, limit: usize) -> Result<Vec<(String, String)>, String> {
+fn cached_gif_ok(path: &std::path::Path) -> bool {
+    path.metadata().map(|m| m.len()).unwrap_or(0) > 0
+}
+
+/// Store a page of remote GIFs in the cache. Downloads run through one parallel
+/// curl invocation: spawning 24 curls serialised TLS handshakes and took ~4-5 s,
+/// which is why the grid felt dead while scrolling.
+fn store_gifs(provider: &str, items: Vec<(String, String)>) -> Vec<(String, String)> {
+    let dir = cache_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let entries: Vec<(std::path::PathBuf, String, String)> = items
+        .into_iter()
+        .map(|(url, title)| (gif_cache_path(provider, &url), url, title))
+        .collect();
+
+    let pending: Vec<&(std::path::PathBuf, String, String)> =
+        entries.iter().filter(|(path, _, _)| !cached_gif_ok(path)).collect();
+    if !pending.is_empty() {
+        let mut cmd = std::process::Command::new("curl");
+        cmd.args(["-sS", "--parallel", "--parallel-max", "8", "--max-time", "15"]);
+        for (path, url, _) in &pending {
+            cmd.arg("-o").arg(path).arg(url);
+        }
+        let _ = cmd.status();
+    }
+
+    entries
+        .into_iter()
+        .filter(|(path, _, _)| cached_gif_ok(path))
+        .map(|(path, _, title)| (path.to_string_lossy().to_string(), title))
+        .collect()
+}
+
+const GIF_PAGE: usize = 24;
+static GIF_OFFSET: std::sync::Mutex<usize> = std::sync::Mutex::new(0);
+static GIF_POS: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+static GIF_TOTAL: std::sync::Mutex<usize> = std::sync::Mutex::new(0);
+static GIF_SEEN: std::sync::Mutex<Option<std::collections::HashSet<String>>> =
+    std::sync::Mutex::new(None);
+static GIF_EXHAUSTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+static GIF_INFLIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static GIF_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// One fetched page, handed back to the GTK main loop by the worker thread.
+struct GifPage {
+    gen: u64,
+    provider: String,
+    offset: usize,
+    next_pos: String,
+    rows: Vec<(String, String)>,
+    error: Option<String>,
+    exhausted: bool,
+    elapsed_ms: u128,
+    query: String,
+}
+
+/// Tenor: featured feed without a query, search with one. `pos` is the cursor
+/// Tenor hands back for the next page.
+fn fetch_tenor(
+    api_key: &str,
+    query: &str,
+    limit: usize,
+    pos: &str,
+) -> Result<(Vec<(String, String)>, String), String> {
     let encoded: String = query.trim().replace(' ', "+");
     let mut url = format!(
         "https://tenor.googleapis.com/v2/{}?key={}&limit={}&media_filter=tinygif",
@@ -210,6 +261,9 @@ fn fetch_tenor(api_key: &str, query: &str, limit: usize) -> Result<Vec<(String, 
     if !encoded.is_empty() {
         url.push_str(&format!("&q={}", encoded));
     }
+    if !pos.is_empty() {
+        url.push_str(&format!("&pos={}", pos));
+    }
     let json = curl_json(&url).ok_or_else(|| "network or curl error".to_string())?;
     if let Some(code) = json.pointer("/error/code") {
         let message = json
@@ -218,13 +272,17 @@ fn fetch_tenor(api_key: &str, query: &str, limit: usize) -> Result<Vec<(String, 
             .unwrap_or("request failed");
         return Err(format!("{message} ({code})"));
     }
-    let mut rows = Vec::new();
-    for (i, item) in json
+    let next = json
+        .get("next")
+        .and_then(|n| n.as_str())
+        .unwrap_or("")
+        .to_string();
+    let mut wanted: Vec<(String, String)> = Vec::new();
+    for item in json
         .get("results")
         .and_then(|r| r.as_array())
         .into_iter()
         .flatten()
-        .enumerate()
     {
         let gif_url = item
             .pointer("/media_formats/tinygif/url")
@@ -234,22 +292,28 @@ fn fetch_tenor(api_key: &str, query: &str, limit: usize) -> Result<Vec<(String, 
             .and_then(|t| t.as_str())
             .unwrap_or("GIF");
         if let Some(gif_url) = gif_url {
-            if let Some(path) = cache_remote_gif(gif_url, "tenor", i) {
-                rows.push((path, title.to_string()));
-            }
+            wanted.push((gif_url.to_string(), title.to_string()));
         }
     }
-    Ok(rows)
+    Ok((store_gifs("tenor", wanted), next))
 }
 
-/// Giphy: trending feed without a query, search with one.
-fn fetch_giphy(api_key: &str, query: &str, limit: usize) -> Result<Vec<(String, String)>, String> {
+/// Giphy: trending feed without a query, search with one; paged by offset.
+/// Prefers the downsampled media: the picker draws 84 px thumbnails, so a
+/// 40-90 KB file beats the ~1 MB original.
+fn fetch_giphy(
+    api_key: &str,
+    query: &str,
+    limit: usize,
+    offset: usize,
+) -> Result<Vec<(String, String)>, String> {
     let encoded: String = query.trim().replace(' ', "+");
     let mut url = format!(
-        "https://api.giphy.com/v1/gifs/{}?api_key={}&limit={}&rating=pg",
+        "https://api.giphy.com/v1/gifs/{}?api_key={}&limit={}&offset={}&rating=pg",
         if encoded.is_empty() { "trending" } else { "search" },
         api_key,
-        limit
+        limit,
+        offset
     );
     if !encoded.is_empty() {
         url.push_str(&format!("&q={}", encoded));
@@ -263,18 +327,17 @@ fn fetch_giphy(api_key: &str, query: &str, limit: usize) -> Result<Vec<(String, 
             .unwrap_or("request failed");
         return Err(message.to_string());
     }
-    let mut rows = Vec::new();
-    for (i, item) in json
+    let mut wanted: Vec<(String, String)> = Vec::new();
+    for item in json
         .get("data")
         .and_then(|d| d.as_array())
         .into_iter()
         .flatten()
-        .enumerate()
     {
         let gif_url = item
-            .pointer("/images/fixed_height/url")
+            .pointer("/images/fixed_height_downsampled/url")
+            .or_else(|| item.pointer("/images/fixed_height/url"))
             .or_else(|| item.pointer("/images/downsized_medium/url"))
-            .or_else(|| item.pointer("/images/original/url"))
             .and_then(|u| u.as_str());
         let title = item
             .get("title")
@@ -282,12 +345,136 @@ fn fetch_giphy(api_key: &str, query: &str, limit: usize) -> Result<Vec<(String, 
             .filter(|t| !t.is_empty())
             .unwrap_or("GIF");
         if let Some(gif_url) = gif_url {
-            if let Some(path) = cache_remote_gif(gif_url, "giphy", i) {
-                rows.push((path, title.to_string()));
+            wanted.push((gif_url.to_string(), title.to_string()));
+        }
+    }
+    Ok(store_gifs("giphy", wanted))
+}
+
+/// Add rows that were not shown yet, and return how many were appended.
+fn append_gif_rows(rows: Vec<(String, String)>) -> usize {
+    let mut guard = GIF_SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    let seen = guard.get_or_insert_with(std::collections::HashSet::new);
+    let mut total = GIF_TOTAL.lock().unwrap_or_else(|e| e.into_inner());
+    let mut added = 0usize;
+    for (path, title) in rows {
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        let c_path = CString::new(path).unwrap_or_default();
+        let c_title = CString::new(title).unwrap_or_default();
+        unsafe { super_v_ui_add_gif_item(c_path.as_ptr(), c_title.as_ptr()); }
+        *total += 1;
+        added += 1;
+    }
+    added
+}
+
+fn set_gif_hint(text: &str) {
+    if let Ok(hint_c) = CString::new(text) {
+        unsafe { super_v_ui_set_gif_hint(hint_c.as_ptr()); }
+    }
+}
+
+fn gif_hint(provider: &str, error: Option<&str>) -> String {
+    match error {
+        Some(message) => format!("{provider} error: {message}"),
+        None => {
+            let total = *GIF_TOTAL.lock().unwrap_or_else(|e| e.into_inner());
+            if provider == "local" {
+                format!("Local GIF library ({total})")
+            } else {
+                format!("{provider}: {total} GIFs")
             }
         }
     }
-    Ok(rows)
+}
+
+/// Fetch one page on a worker thread. Downloads take seconds; doing this on the
+/// GTK main thread froze the picker while scrolling.
+fn start_gif_page(provider: String, key: String, query: String) {
+    let gen = GIF_GEN.load(std::sync::atomic::Ordering::Relaxed);
+    let offset = *GIF_OFFSET.lock().unwrap_or_else(|e| e.into_inner());
+    let pos = GIF_POS.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    GIF_INFLIGHT.store(true, std::sync::atomic::Ordering::Relaxed);
+
+    std::thread::spawn(move || {
+        let started = std::time::Instant::now();
+        let result = match provider.as_str() {
+            "giphy" => fetch_giphy(&key, &query, GIF_PAGE, offset).map(|rows| {
+                let exhausted = rows.len() < GIF_PAGE;
+                (rows, String::new(), exhausted)
+            }),
+            "tenor" => fetch_tenor(&key, &query, GIF_PAGE, &pos)
+                .map(|(rows, next)| (rows, next, false)),
+            _ => Ok((Vec::new(), String::new(), true)),
+        };
+
+        let page = match result {
+            Ok((rows, next_pos, short)) => {
+                let exhausted = short || (next_pos.is_empty() && provider == "tenor");
+                GifPage {
+                    gen,
+                    provider,
+                    offset,
+                    next_pos,
+                    exhausted,
+                    rows,
+                    error: None,
+                    elapsed_ms: started.elapsed().as_millis(),
+                    query: query.clone(),
+                }
+            }
+            Err(err) => GifPage {
+                gen,
+                provider,
+                offset,
+                next_pos: String::new(),
+                rows: Vec::new(),
+                error: Some(err),
+                exhausted: true,
+                elapsed_ms: started.elapsed().as_millis(),
+                query: query.clone(),
+            },
+        };
+        unsafe {
+            super_v_ui_post_to_main(
+                deliver_gif_page,
+                Box::into_raw(Box::new(page)) as *mut std::ffi::c_void,
+            );
+        }
+    });
+}
+
+/// Runs on the GTK main thread: the only place widgets are touched.
+extern "C" fn deliver_gif_page(data: *mut std::ffi::c_void) {
+    if data.is_null() {
+        return;
+    }
+    let page = unsafe { Box::from_raw(data as *mut GifPage) };
+    GIF_INFLIGHT.store(false, std::sync::atomic::Ordering::Relaxed);
+    if page.gen != GIF_GEN.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+
+    *GIF_OFFSET.lock().unwrap_or_else(|e| e.into_inner()) = page.offset + GIF_PAGE;
+    if !page.next_pos.is_empty() {
+        *GIF_POS.lock().unwrap_or_else(|e| e.into_inner()) = page.next_pos.clone();
+    }
+    GIF_EXHAUSTED.store(page.exhausted, std::sync::atomic::Ordering::Relaxed);
+    append_gif_rows(page.rows);
+
+    let hint = gif_hint(&page.provider, page.error.as_deref());
+    let suffix = if page.query.is_empty() {
+        String::new()
+    } else {
+        format!(" for '{}'", page.query)
+    };
+    append_log(&format!(
+        "gif page: {hint} in {}ms{suffix}",
+        page.elapsed_ms
+    ));
+    set_gif_hint(&hint);
 }
 
 fn load_gifs() {
@@ -295,45 +482,51 @@ fn load_gifs() {
     let query = GIF_QUERY.lock().map(|q| q.clone()).unwrap_or_default();
     unsafe { super_v_ui_clear_gif_items(); }
 
-    let cfg = load_settings();
-    let mut rows: Vec<(String, String)> = Vec::new();
-    let hint: String;
-
-    match provider.as_str() {
-        "giphy" | "tenor" if cfg.gif_api_key.is_empty() => {
-            hint = format!("{provider}: add the API key in Preferences to load GIFs");
-        }
-        "giphy" => match fetch_giphy(&cfg.gif_api_key, &query, 24) {
-            Ok(fetched) => {
-                hint = format!("giphy: {} GIFs", fetched.len());
-                rows = fetched;
-            }
-            Err(err) => hint = format!("giphy error: {err}"),
-        },
-        "tenor" => match fetch_tenor(&cfg.gif_api_key, &query, 24) {
-            Ok(fetched) => {
-                hint = format!("tenor: {} GIFs", fetched.len());
-                rows = fetched;
-            }
-            Err(err) => hint = format!("tenor error: {err}"),
-        },
-        _ => hint = "Local GIF library".to_string(),
-    }
+    GIF_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    GIF_INFLIGHT.store(false, std::sync::atomic::Ordering::Relaxed);
+    GIF_EXHAUSTED.store(true, std::sync::atomic::Ordering::Relaxed);
+    *GIF_OFFSET.lock().unwrap_or_else(|e| e.into_inner()) = 0;
+    *GIF_POS.lock().unwrap_or_else(|e| e.into_inner()) = String::new();
+    *GIF_TOTAL.lock().unwrap_or_else(|e| e.into_inner()) = 0;
+    *GIF_SEEN.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::collections::HashSet::new());
 
     for item in super_v_core::GifScanner::default_dirs().scan_local_gifs(60) {
-        rows.push((item.path, item.filename));
-    }
-    append_log(&format!("gif load: {hint}"));
-
-    if let Ok(hint_c) = CString::new(hint) {
-        unsafe { super_v_ui_set_gif_hint(hint_c.as_ptr()); }
+        append_gif_rows(vec![(item.path, item.filename)]);
     }
 
-    for (path, title) in rows {
-        let c_path = CString::new(path).unwrap_or_default();
-        let c_title = CString::new(title).unwrap_or_default();
-        unsafe { super_v_ui_add_gif_item(c_path.as_ptr(), c_title.as_ptr()); }
+    let cfg = load_settings();
+    if provider == "local" {
+        let hint = gif_hint("local", None);
+        append_log(&format!("gif load: {hint}"));
+        set_gif_hint(&hint);
+        return;
     }
+    if cfg.gif_api_key.is_empty() {
+        set_gif_hint(&format!("{provider}: add the API key in Preferences to load GIFs"));
+        return;
+    }
+
+    GIF_EXHAUSTED.store(false, std::sync::atomic::Ordering::Relaxed);
+    set_gif_hint(&format!("{provider}: loading…"));
+    start_gif_page(provider, cfg.gif_api_key, query);
+}
+
+/// Next page when the grid is scrolled to the bottom.
+fn load_more_gifs() {
+    let provider = current_gif_provider();
+    if provider == "local"
+        || GIF_EXHAUSTED.load(std::sync::atomic::Ordering::Relaxed)
+        || GIF_INFLIGHT.load(std::sync::atomic::Ordering::Relaxed)
+    {
+        return;
+    }
+    let cfg = load_settings();
+    if cfg.gif_api_key.is_empty() {
+        GIF_EXHAUSTED.store(true, std::sync::atomic::Ordering::Relaxed);
+        return;
+    }
+    let query = GIF_QUERY.lock().map(|q| q.clone()).unwrap_or_default();
+    start_gif_page(provider, cfg.gif_api_key, query);
 }
 
 extern "C" fn on_language_changed(langs: *const c_char) {
@@ -376,6 +569,10 @@ extern "C" fn on_gif_search(query: *const c_char) {
         *guard = value;
     }
     load_gifs();
+}
+
+extern "C" fn on_gif_more() {
+    load_more_gifs();
 }
 
 extern "C" fn on_gif_reload() {
@@ -876,6 +1073,7 @@ fn main() -> Result<()> {
         super_v_ui_set_gif_provider_hook(on_gif_provider_changed);
         super_v_ui_set_gif_reload_hook(on_gif_reload);
         super_v_ui_set_gif_search_hook(on_gif_search);
+        super_v_ui_set_gif_more_hook(on_gif_more);
         super_v_ui_set_api_key_hook(on_api_key_changed);
         super_v_ui_set_provider_test_hook(on_provider_test);
         super_v_ui_set_placement_hook(on_placement_changed);

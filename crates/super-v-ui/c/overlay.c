@@ -43,6 +43,8 @@ static LanguageHook g_language_hook = NULL;
 static GifProviderHook g_gif_provider_hook = NULL;
 static GifReloadHook g_gif_reload_hook = NULL;
 static GifSearchHook g_gif_search_hook = NULL;
+static GifMoreHook g_gif_more_hook = NULL;
+static gboolean g_gif_requested = FALSE;
 static ApiKeyHook g_api_key_hook = NULL;
 static ProviderTestHook g_provider_test_hook = NULL;
 static char g_api_key[256] = "";
@@ -93,6 +95,27 @@ void super_v_ui_set_language_hook(LanguageHook cb) { g_language_hook = cb; }
 void super_v_ui_set_gif_provider_hook(GifProviderHook cb) { g_gif_provider_hook = cb; }
 void super_v_ui_set_gif_reload_hook(GifReloadHook cb) { g_gif_reload_hook = cb; }
 void super_v_ui_set_gif_search_hook(GifSearchHook cb) { g_gif_search_hook = cb; }
+void super_v_ui_set_gif_more_hook(GifMoreHook cb) { g_gif_more_hook = cb; }
+
+typedef struct {
+    MainTaskFn fn;
+    void *data;
+} MainTask;
+
+static gboolean main_task_run(gpointer payload) {
+    MainTask *task = payload;
+    if (task->fn) task->fn(task->data);
+    g_free(task);
+    return G_SOURCE_REMOVE;
+}
+
+/* Worker threads cannot touch GTK; they hand the result back through here. */
+void super_v_ui_post_to_main(MainTaskFn fn, void *data) {
+    MainTask *task = g_new0(MainTask, 1);
+    task->fn = fn;
+    task->data = data;
+    g_idle_add_full(G_PRIORITY_DEFAULT_IDLE, main_task_run, task, NULL);
+}
 void super_v_ui_set_api_key_hook(ApiKeyHook cb) { g_api_key_hook = cb; }
 void super_v_ui_set_provider_test_hook(ProviderTestHook cb) { g_provider_test_hook = cb; }
 void super_v_ui_set_placement_hook(PlacementHook cb) { g_placement_hook = cb; }
@@ -984,6 +1007,14 @@ static void on_scroll_edge(GtkScrolledWindow *sw, GtkPositionType pos, gpointer 
     load_more_glyphs((const char *)user_data);
 }
 
+/* GIF pages come from the provider, so the edge asks Rust for the next page.
+ * Rust stops asking once the provider is exhausted. */
+static void on_gif_scroll_edge(GtkScrolledWindow *sw, GtkPositionType pos, gpointer user_data) {
+    (void)sw; (void)user_data;
+    if (pos != GTK_POS_BOTTOM) return;
+    if (g_gif_more_hook) g_gif_more_hook();
+}
+
 static void on_tab_switched(GObject *obj, GParamSpec *pspec, gpointer user_data) {
     (void)obj; (void)pspec; (void)user_data;
     if (!g_stack) return;
@@ -999,6 +1030,13 @@ static void on_tab_switched(GObject *obj, GParamSpec *pspec, gpointer user_data)
         if (g_offset_emoji == 0) first_page("emoji");
     } else if (strcmp(name, "symbols") == 0) {
         if (g_offset_symbol == 0) first_page("symbols");
+    } else if (strcmp(name, "gif") == 0) {
+        gtk_flow_box_invalidate_filter(GTK_FLOW_BOX(g_gif_flow));
+        /* Pages are fetched asynchronously, so request the first one once. */
+        if (!g_gif_requested) {
+            g_gif_requested = TRUE;
+            super_v_ui_refresh_gifs();
+        }
     }
 }
 
@@ -1079,12 +1117,16 @@ void super_v_ui_set_gif_hint(const char *text) {
 }
 
 void super_v_ui_refresh_gifs(void) {
+    g_gif_requested = TRUE;
     super_v_ui_clear_gif_items();
     if (g_gif_reload_hook) g_gif_reload_hook();
 }
 
 static gboolean filter_gif_row(GtkFlowBoxChild *child, gpointer user_data) {
     (void)user_data;
+    /* Online providers already searched: filtering titles again would hide the
+     * very hits the API returned for the query. */
+    if (strcmp(g_gif_provider, "local") != 0) return TRUE;
     const char *query = gtk_editable_get_text(GTK_EDITABLE(g_search_entry));
     if (!query || !*query) return TRUE;
     GtkWidget *btn = gtk_flow_box_child_get_child(child);
@@ -1839,11 +1881,22 @@ static gboolean selftest_activate_row(gpointer data) {
 static gboolean take_snapshot(gpointer data) {
     const char *path = (const char *)data;
     static gboolean tab_switched = FALSE;
+    static gboolean query_applied = FALSE;
     const char *tab = g_getenv("SUPER_V_SNAPSHOT_TAB");
     if (tab && g_stack && !tab_switched) {
         adw_view_stack_set_visible_child_name(ADW_VIEW_STACK(g_stack), tab);
         tab_switched = TRUE;
         g_timeout_add(500, take_snapshot, g_strdup(path));
+        return G_SOURCE_REMOVE;
+    }
+    /* GIF pages arrive asynchronously, so apply the query and give the provider
+     * time to deliver before capturing. */
+    const char *snapshot_query = g_getenv("SUPER_V_SNAPSHOT_QUERY");
+    if (snapshot_query && !query_applied) {
+        query_applied = TRUE;
+        apply_entry_text(snapshot_query);
+        if (g_gif_search_hook) g_gif_search_hook(snapshot_query);
+        g_timeout_add(2800, take_snapshot, g_strdup(path));
         return G_SOURCE_REMOVE;
     }
     if (!g_main_window || !path) return G_SOURCE_REMOVE;
@@ -1866,6 +1919,29 @@ static gboolean take_snapshot(gpointer data) {
     }
     g_object_unref(paintable);
     gsk_render_node_unref(node);
+    g_application_quit(G_APPLICATION(g_application_get_default()));
+    return G_SOURCE_REMOVE;
+}
+
+static int g_gif_probe_round = 0;
+
+/* Async paging check: waits for each page to land before asking for the next. */
+static gboolean gif_probe_round_cb(gpointer data) {
+    (void)data;
+    int items = 0;
+    for (GtkWidget *w = gtk_widget_get_first_child(g_gif_flow); w;
+         w = gtk_widget_get_next_sibling(w)) {
+        items++;
+    }
+    printf("VERIFY: gif_round=%d items=%d hint=%s\n", g_gif_probe_round, items,
+        g_gif_label ? gtk_label_get_text(GTK_LABEL(g_gif_label)) : "");
+    fflush(stdout);
+    if (g_gif_probe_round < 3) {
+        g_gif_probe_round++;
+        if (g_gif_more_hook) g_gif_more_hook();
+        g_timeout_add(3500, gif_probe_round_cb, NULL);
+        return G_SOURCE_REMOVE;
+    }
     g_application_quit(G_APPLICATION(g_application_get_default()));
     return G_SOURCE_REMOVE;
 }
@@ -1969,6 +2045,17 @@ static gboolean run_selftest(gpointer data) {
             }
             printf("\n");
         }
+    }
+    if (g_getenv("SUPER_V_SELFTEST_GIF_MORE") && g_gif_more_hook) {
+        const char *probe_query = g_getenv("SUPER_V_SELFTEST_GIF_SEARCH");
+        if (probe_query) {
+            g_strlcpy(g_gif_query, probe_query, sizeof(g_gif_query));
+            apply_entry_text(probe_query);
+            if (g_gif_search_hook) g_gif_search_hook(probe_query);
+        }
+        g_gif_probe_round = 0;
+        g_timeout_add(2500, gif_probe_round_cb, NULL);
+        return G_SOURCE_REMOVE;
     }
     printf("VERIFY: no_crash=true\n");
     fflush(stdout);
@@ -2227,6 +2314,7 @@ static GtkWidget *create_main_window(AdwApplication *app) {
     gtk_box_append(GTK_BOX(gif_container), g_gif_flow);
 
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(gif_scroll), gif_container);
+    g_signal_connect(gif_scroll, "edge-reached", G_CALLBACK(on_gif_scroll_edge), NULL);
     adw_view_stack_add_titled_with_icon(ADW_VIEW_STACK(g_stack), gif_scroll, "gif", "GIF", "media-optical-symbolic");
 
     /* TAB 4: symbols */

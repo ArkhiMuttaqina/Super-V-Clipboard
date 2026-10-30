@@ -38,7 +38,7 @@ Validated deterministically via `autoresearch.sh`:
   - Clipboard history with pinning, delete, deduplication, secret masking and SQLite FTS5 search
   - **3,963 emoji** = every fully-qualified RGI sequence of Unicode Emoji 18.0, including 2,040 skin-tone variants, 1,614 ZWJ sequences and 262 flags, with **multilingual search** (see [docs/GLYPHS.md](docs/GLYPHS.md))
   - 1,073 math, currency, arrow, Greek and punctuation symbols (also searchable)
-  - GIF tab: local library plus Tenor or Giphy (whatever is selected in Preferences); typing searches the provider, and results are cached under `~/.cache/super-v-clipboard/gifs`
+  - GIF tab: local library plus Tenor or Giphy (whatever is selected in Preferences); typing searches the provider, scrolling to the bottom pulls the next page, and every GIF is cached under `~/.cache/super-v-clipboard/gifs` (one file per URL, fetched 8-at-a-time on a worker thread so the UI never blocks)
 - **Instant Synthetic Paste:** Auto-pastes the selection into the active client via XTest or the virtual-keyboard protocol; the UI also owns the clipboard so manual `Ctrl+V` works.
 
 ### Multilingual emoji search

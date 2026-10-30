@@ -30,6 +30,12 @@ typedef void (*LanguageHook)(const char *langs);   /* e.g. "en,id" */
 typedef void (*GifProviderHook)(const char *id);   /* "local", "tenor", ... */
 typedef void (*GifReloadHook)(void);
 typedef void (*GifSearchHook)(const char *query);
+typedef void (*GifMoreHook)(void);
+
+/* Queue a callback on the GTK main loop; used by worker threads that fetched
+   data and must touch widgets only from the main thread. */
+typedef void (*MainTaskFn)(void *data);
+void super_v_ui_post_to_main(MainTaskFn fn, void *data);
 typedef void (*ApiKeyHook)(const char *key);
 typedef void (*ProviderTestHook)(const char *provider);
 typedef void (*PlacementHook)(const char *mode);
@@ -47,6 +53,7 @@ void super_v_ui_set_language_hook(LanguageHook cb);
 void super_v_ui_set_gif_provider_hook(GifProviderHook cb);
 void super_v_ui_set_gif_reload_hook(GifReloadHook cb);
 void super_v_ui_set_gif_search_hook(GifSearchHook cb);
+void super_v_ui_set_gif_more_hook(GifMoreHook cb);
 void super_v_ui_set_api_key_hook(ApiKeyHook cb);
 void super_v_ui_set_provider_test_hook(ProviderTestHook cb);
 void super_v_ui_set_placement_hook(PlacementHook cb);
