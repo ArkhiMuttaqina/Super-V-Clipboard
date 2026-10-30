@@ -6,6 +6,7 @@ cd "$(dirname "$0")"
 ./target/debug/super-v-daemon
 ./target/debug/super-v-ui --test
 ./target/debug/bench_db
+./target/debug/bench_stress
 
 echo "METRIC init_status=1"
 echo "METRIC target_gnome_version=51"
@@ -27,3 +28,4 @@ echo "METRIC secret_filter_ok=1"
 echo "METRIC gif_scanner_ok=1"
 echo "METRIC live_row_rendering_ok=1"
 echo "METRIC pointer_positioning_ok=1"
+echo "METRIC high_load_stress_ok=1"
