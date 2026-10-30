@@ -42,6 +42,7 @@ static ActivateHook g_activate_hook = NULL;
 static LanguageHook g_language_hook = NULL;
 static GifProviderHook g_gif_provider_hook = NULL;
 static GifReloadHook g_gif_reload_hook = NULL;
+static GifSearchHook g_gif_search_hook = NULL;
 static ApiKeyHook g_api_key_hook = NULL;
 static ProviderTestHook g_provider_test_hook = NULL;
 static char g_api_key[256] = "";
@@ -91,6 +92,7 @@ void super_v_ui_set_activate_hook(ActivateHook cb) { g_activate_hook = cb; }
 void super_v_ui_set_language_hook(LanguageHook cb) { g_language_hook = cb; }
 void super_v_ui_set_gif_provider_hook(GifProviderHook cb) { g_gif_provider_hook = cb; }
 void super_v_ui_set_gif_reload_hook(GifReloadHook cb) { g_gif_reload_hook = cb; }
+void super_v_ui_set_gif_search_hook(GifSearchHook cb) { g_gif_search_hook = cb; }
 void super_v_ui_set_api_key_hook(ApiKeyHook cb) { g_api_key_hook = cb; }
 void super_v_ui_set_provider_test_hook(ProviderTestHook cb) { g_provider_test_hook = cb; }
 void super_v_ui_set_placement_hook(PlacementHook cb) { g_placement_hook = cb; }
@@ -103,7 +105,7 @@ static void install_css(void) {
         ".emoji-cell { font-size: 25px; min-width: 44px; min-height: 44px; padding: 0; }\n"
         ".symbol-cell { font-size: 20px; min-width: 44px; min-height: 44px; padding: 0; }\n"
         ".gif-cell { padding: 0; }\n"
-        ".gif-cell image { border-radius: 8px; }\n"
+        ".gif-cell image { -gtk-icon-size: 84px; border-radius: 8px; }\n"
         ".superv-overlay { background: transparent; }\n"
         ".section-row { background: transparent; box-shadow: none; border: none; padding: 0; min-height: 0; }\n"
         ".section-label { font-weight: 700; font-size: 88%; opacity: 0.6; margin: 10px 6px 2px 6px; }\n"
@@ -1000,6 +1002,17 @@ static void on_tab_switched(GObject *obj, GParamSpec *pspec, gpointer user_data)
     }
 }
 
+/* GIF search hits the provider, so debounce it instead of firing per keystroke. */
+static guint g_gif_search_source = 0;
+static char g_gif_query[160] = "";
+
+static gboolean gif_search_fire(gpointer data) {
+    (void)data;
+    g_gif_search_source = 0;
+    if (g_gif_search_hook) g_gif_search_hook(g_gif_query);
+    return G_SOURCE_REMOVE;
+}
+
 static void on_search_changed(GtkSearchEntry *entry, gpointer user_data) {
     (void)entry; (void)user_data;
     if (g_setting_entry) return;
@@ -1023,6 +1036,9 @@ static void on_search_changed(GtkSearchEntry *entry, gpointer user_data) {
         first_page("symbols");
     } else if (strcmp(name, "gif") == 0) {
         gtk_flow_box_invalidate_filter(GTK_FLOW_BOX(g_gif_flow));
+        g_strlcpy(g_gif_query, q, sizeof(g_gif_query));
+        if (g_gif_search_source) g_source_remove(g_gif_search_source);
+        g_gif_search_source = g_timeout_add(450, gif_search_fire, NULL);
     }
 }
 
@@ -1125,7 +1141,6 @@ static int gif_index_for(const char *id) {
     if (!id) return 0;
     if (strcmp(id, "tenor") == 0) return 1;
     if (strcmp(id, "giphy") == 0) return 2;
-    if (strcmp(id, "klarna") == 0) return 3;
     return 0;
 }
 
@@ -1133,7 +1148,6 @@ static const char *gif_id_for_index(int idx) {
     switch (idx) {
         case 1: return "tenor";
         case 2: return "giphy";
-        case 3: return "klarna";
         default: return "local";
     }
 }
@@ -1538,7 +1552,7 @@ void super_v_ui_show_settings(void *parent_window) {
         "Want another provider? Send a PR upstream: github.com/ArkhiMuttaqina/Super-V-Clipboard");
     adw_preferences_page_add(gif_page, gif_group);
 
-    const char *providers[] = { "Local library (~/Pictures, ~/Downloads)", "Tenor API", "Giphy", "Klarna", NULL };
+    const char *providers[] = { "Local library (~/Pictures, ~/Downloads)", "Tenor API", "Giphy", NULL };
     g_gif_combo = adw_combo_row_new();
     adw_preferences_row_set_title(ADW_PREFERENCES_ROW(g_gif_combo), "Active provider");
     adw_combo_row_set_model(ADW_COMBO_ROW(g_gif_combo), G_LIST_MODEL(gtk_string_list_new(providers)));

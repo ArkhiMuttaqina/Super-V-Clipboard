@@ -29,6 +29,7 @@ typedef void (*ActivateHook)(void);
 typedef void (*LanguageHook)(const char *langs);   /* e.g. "en,id" */
 typedef void (*GifProviderHook)(const char *id);   /* "local", "tenor", ... */
 typedef void (*GifReloadHook)(void);
+typedef void (*GifSearchHook)(const char *query);
 typedef void (*ApiKeyHook)(const char *key);
 typedef void (*ProviderTestHook)(const char *provider);
 typedef void (*PlacementHook)(const char *mode);
@@ -45,6 +46,7 @@ void super_v_ui_set_activate_hook(ActivateHook cb);
 void super_v_ui_set_language_hook(LanguageHook cb);
 void super_v_ui_set_gif_provider_hook(GifProviderHook cb);
 void super_v_ui_set_gif_reload_hook(GifReloadHook cb);
+void super_v_ui_set_gif_search_hook(GifSearchHook cb);
 void super_v_ui_set_api_key_hook(ApiKeyHook cb);
 void super_v_ui_set_provider_test_hook(ProviderTestHook cb);
 void super_v_ui_set_placement_hook(PlacementHook cb);

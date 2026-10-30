@@ -14,6 +14,7 @@ type ActivateHook = extern "C" fn();
 type LanguageHook = extern "C" fn(langs: *const c_char);
 type GifProviderHook = extern "C" fn(id: *const c_char);
 type GifReloadHook = extern "C" fn();
+type GifSearchHook = extern "C" fn(query: *const c_char);
 type ApiKeyHook = extern "C" fn(key: *const c_char);
 type ProviderTestHook = extern "C" fn(provider: *const c_char);
 type PlacementHook = extern "C" fn(mode: *const c_char);
@@ -32,6 +33,7 @@ extern "C" {
     fn super_v_ui_set_language_hook(cb: LanguageHook);
     fn super_v_ui_set_gif_provider_hook(cb: GifProviderHook);
     fn super_v_ui_set_gif_reload_hook(cb: GifReloadHook);
+    fn super_v_ui_set_gif_search_hook(cb: GifSearchHook);
     fn super_v_ui_set_api_key_hook(cb: ApiKeyHook);
     fn super_v_ui_set_provider_test_hook(cb: ProviderTestHook);
     fn super_v_ui_set_placement_hook(cb: PlacementHook);
@@ -153,6 +155,7 @@ fn save_settings(cfg: &Settings) {
 
 static LANGS: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 static GIF_PROVIDER: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+static GIF_QUERY: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 
 fn current_langs() -> String {
     LANGS.lock().map(|g| g.clone()).unwrap_or_else(|_| "en,id".to_string())
@@ -172,11 +175,31 @@ fn cache_dir() -> std::path::PathBuf {
     base.join("super-v-clipboard").join("gifs")
 }
 
-/// Fetch trending/search GIFs from Tenor and cache the files locally.
-fn fetch_tenor(api_key: &str, query: &str, limit: usize) -> Vec<(String, String)> {
-    if api_key.is_empty() {
-        return Vec::new();
+/// Download one remote GIF into the cache directory and return its path.
+fn cache_remote_gif(url: &str, provider: &str, index: usize) -> Option<String> {
+    use std::hash::{Hash, Hasher};
+    let dir = cache_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    url.hash(&mut hasher);
+    let dest = dir.join(format!("{}-{}-{}.gif", provider, hasher.finish(), index));
+    if !dest.exists() {
+        let _ = std::process::Command::new("curl")
+            .args(["-sS", "--max-time", "8", "-o", &dest.to_string_lossy(), url])
+            .status();
+        if !dest.exists() {
+            return None;
+        }
     }
+    if dest.metadata().map(|m| m.len()).unwrap_or(0) == 0 {
+        let _ = std::fs::remove_file(&dest);
+        return None;
+    }
+    Some(dest.to_string_lossy().to_string())
+}
+
+/// Tenor: featured feed without a query, search with one.
+fn fetch_tenor(api_key: &str, query: &str, limit: usize) -> Result<Vec<(String, String)>, String> {
     let encoded: String = query.trim().replace(' ', "+");
     let mut url = format!(
         "https://tenor.googleapis.com/v2/{}?key={}&limit={}&media_filter=tinygif",
@@ -187,74 +210,121 @@ fn fetch_tenor(api_key: &str, query: &str, limit: usize) -> Vec<(String, String)
     if !encoded.is_empty() {
         url.push_str(&format!("&q={}", encoded));
     }
-
-    let out = std::process::Command::new("curl")
-        .args(["-sS", "--max-time", "8", &url])
-        .output();
-    let body = match out {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
-        _ => return Vec::new(),
-    };
-
-    let json: serde_json::Value = match serde_json::from_str(&body) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-
-    let dir = cache_dir();
-    let _ = std::fs::create_dir_all(&dir);
-    let mut items = Vec::new();
-
-    if let Some(results) = json.get("results").and_then(|r| r.as_array()) {
-        for (i, item) in results.iter().enumerate() {
-            let gif_url = item
-                .get("media_formats")
-                .and_then(|m| m.get("tinygif"))
-                .and_then(|t| t.get("url"))
-                .and_then(|u| u.as_str());
-            let title = item.get("content_description").and_then(|t| t.as_str()).unwrap_or("GIF");
-            if let Some(gif_url) = gif_url {
-                use std::hash::{Hash, Hasher};
-                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                gif_url.hash(&mut hasher);
-                let dest = dir.join(format!("{}-{}.gif", hasher.finish(), i));
-                if !dest.exists() {
-                    let _ = std::process::Command::new("curl")
-                        .args(["-sS", "--max-time", "8", "-o", &dest.to_string_lossy(), gif_url])
-                        .status();
-                }
-                if dest.exists() {
-                    items.push((dest.to_string_lossy().to_string(), title.to_string()));
-                }
+    let json = curl_json(&url).ok_or_else(|| "network or curl error".to_string())?;
+    if let Some(code) = json.pointer("/error/code") {
+        let message = json
+            .pointer("/error/message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("request failed");
+        return Err(format!("{message} ({code})"));
+    }
+    let mut rows = Vec::new();
+    for (i, item) in json
+        .get("results")
+        .and_then(|r| r.as_array())
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        let gif_url = item
+            .pointer("/media_formats/tinygif/url")
+            .and_then(|u| u.as_str());
+        let title = item
+            .get("content_description")
+            .and_then(|t| t.as_str())
+            .unwrap_or("GIF");
+        if let Some(gif_url) = gif_url {
+            if let Some(path) = cache_remote_gif(gif_url, "tenor", i) {
+                rows.push((path, title.to_string()));
             }
         }
     }
-    items
+    Ok(rows)
+}
+
+/// Giphy: trending feed without a query, search with one.
+fn fetch_giphy(api_key: &str, query: &str, limit: usize) -> Result<Vec<(String, String)>, String> {
+    let encoded: String = query.trim().replace(' ', "+");
+    let mut url = format!(
+        "https://api.giphy.com/v1/gifs/{}?api_key={}&limit={}&rating=pg",
+        if encoded.is_empty() { "trending" } else { "search" },
+        api_key,
+        limit
+    );
+    if !encoded.is_empty() {
+        url.push_str(&format!("&q={}", encoded));
+    }
+    let json = curl_json(&url).ok_or_else(|| "network or curl error".to_string())?;
+    if json.pointer("/meta/status").and_then(|s| s.as_u64()) != Some(200) {
+        let message = json
+            .get("message")
+            .and_then(|m| m.as_str())
+            .or_else(|| json.pointer("/meta/msg").and_then(|m| m.as_str()))
+            .unwrap_or("request failed");
+        return Err(message.to_string());
+    }
+    let mut rows = Vec::new();
+    for (i, item) in json
+        .get("data")
+        .and_then(|d| d.as_array())
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        let gif_url = item
+            .pointer("/images/fixed_height/url")
+            .or_else(|| item.pointer("/images/downsized_medium/url"))
+            .or_else(|| item.pointer("/images/original/url"))
+            .and_then(|u| u.as_str());
+        let title = item
+            .get("title")
+            .and_then(|t| t.as_str())
+            .filter(|t| !t.is_empty())
+            .unwrap_or("GIF");
+        if let Some(gif_url) = gif_url {
+            if let Some(path) = cache_remote_gif(gif_url, "giphy", i) {
+                rows.push((path, title.to_string()));
+            }
+        }
+    }
+    Ok(rows)
 }
 
 fn load_gifs() {
     let provider = current_gif_provider();
+    let query = GIF_QUERY.lock().map(|q| q.clone()).unwrap_or_default();
     unsafe { super_v_ui_clear_gif_items(); }
 
+    let cfg = load_settings();
     let mut rows: Vec<(String, String)> = Vec::new();
+    let hint: String;
 
-    if provider != "local" {
-        let cfg = load_settings();
-        rows = fetch_tenor(&cfg.gif_api_key, "", 24);
+    match provider.as_str() {
+        "giphy" | "tenor" if cfg.gif_api_key.is_empty() => {
+            hint = format!("{provider}: add the API key in Preferences to load GIFs");
+        }
+        "giphy" => match fetch_giphy(&cfg.gif_api_key, &query, 24) {
+            Ok(fetched) => {
+                hint = format!("giphy: {} GIFs", fetched.len());
+                rows = fetched;
+            }
+            Err(err) => hint = format!("giphy error: {err}"),
+        },
+        "tenor" => match fetch_tenor(&cfg.gif_api_key, &query, 24) {
+            Ok(fetched) => {
+                hint = format!("tenor: {} GIFs", fetched.len());
+                rows = fetched;
+            }
+            Err(err) => hint = format!("tenor error: {err}"),
+        },
+        _ => hint = "Local GIF library".to_string(),
     }
 
     for item in super_v_core::GifScanner::default_dirs().scan_local_gifs(60) {
         rows.push((item.path, item.filename));
     }
+    append_log(&format!("gif load: {hint}"));
 
-    let cfg = load_settings();
-    let hint = if provider == "local" {
-        "Local GIF library".to_string()
-    } else if cfg.gif_api_key.is_empty() {
-        format!("{} selected: add gif_api_key to settings.json to fetch online", provider)
-    } else {
-        format!("{} results", provider)
-    };
     if let Ok(hint_c) = CString::new(hint) {
         unsafe { super_v_ui_set_gif_hint(hint_c.as_ptr()); }
     }
@@ -292,6 +362,20 @@ extern "C" fn on_gif_provider_changed(provider: *const c_char) {
     let mut cfg = load_settings();
     cfg.gif_provider = value;
     save_settings(&cfg);
+}
+
+extern "C" fn on_gif_search(query: *const c_char) {
+    if query.is_null() {
+        return;
+    }
+    let value = unsafe { CStr::from_ptr(query) }.to_string_lossy().to_string();
+    if let Ok(mut guard) = GIF_QUERY.lock() {
+        if *guard == value {
+            return;
+        }
+        *guard = value;
+    }
+    load_gifs();
 }
 
 extern "C" fn on_gif_reload() {
@@ -791,6 +875,7 @@ fn main() -> Result<()> {
         super_v_ui_set_language_hook(on_language_changed);
         super_v_ui_set_gif_provider_hook(on_gif_provider_changed);
         super_v_ui_set_gif_reload_hook(on_gif_reload);
+        super_v_ui_set_gif_search_hook(on_gif_search);
         super_v_ui_set_api_key_hook(on_api_key_changed);
         super_v_ui_set_provider_test_hook(on_provider_test);
         super_v_ui_set_placement_hook(on_placement_changed);
