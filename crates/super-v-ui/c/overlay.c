@@ -27,6 +27,7 @@ static gboolean g_skip_change = FALSE;
 static guint g_restore_source = 0;
 static char *g_saved_clip = NULL;
 static ClipTextHook g_clip_hook = NULL;
+static ImageHook g_image_hook = NULL;
 
 static GtkWidget *g_lang_combo = NULL;
 static GtkWidget *g_gif_combo = NULL;
@@ -124,6 +125,7 @@ static void copy_text_to_clipboard(const char *text) {
 /* --------------------------------------------------------- clipboard watch */
 
 void super_v_ui_set_clipboard_hook(ClipTextHook cb) { g_clip_hook = cb; }
+void super_v_ui_set_image_hook(ImageHook cb) { g_image_hook = cb; }
 
 static void on_clipboard_text_ready(GObject *source, GAsyncResult *res, gpointer data) {
     (void)data;
@@ -1577,11 +1579,33 @@ static gboolean sync_clipboard_idle(gpointer data) {
     return G_SOURCE_REMOVE;
 }
 
+static void on_clipboard_texture_ready(GObject *source, GAsyncResult *res, gpointer data) {
+    (void)data;
+    GError *err = NULL;
+    GdkTexture *texture = gdk_clipboard_read_texture_finish(GDK_CLIPBOARD(source), res, &err);
+    if (!texture) {
+        if (err) {
+            if (g_getenv("SUPER_V_DEBUG_CLIPBOARD")) g_printerr("IMG read failed: %s\n", err->message);
+            g_error_free(err);
+        }
+        return;
+    }
+    char path[256];
+    g_snprintf(path, sizeof(path), "/tmp/super-v-ui-clip-%" G_GINT64_FORMAT ".png",
+        (gint64)g_get_monotonic_time());
+    gdk_texture_save_to_png(texture, path);
+    g_object_unref(texture);
+    if (g_getenv("SUPER_V_DEBUG_CLIPBOARD")) g_printerr("IMG captured %s\n", path);
+    if (g_image_hook) g_image_hook(path);
+}
+
 static void sync_clipboard_once(void) {
     GdkDisplay *d = gdk_display_get_default();
     if (!d) return;
     GdkClipboard *clip = gdk_display_get_clipboard(d);
-    if (clip) gdk_clipboard_read_text_async(clip, NULL, on_clipboard_text_ready, NULL);
+    if (!clip) return;
+    gdk_clipboard_read_text_async(clip, NULL, on_clipboard_text_ready, NULL);
+    gdk_clipboard_read_texture_async(clip, NULL, on_clipboard_texture_ready, NULL);
 }
 
 static gboolean on_toggle_signal(gpointer data) {

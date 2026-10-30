@@ -18,6 +18,7 @@ type ApiKeyHook = extern "C" fn(key: *const c_char);
 type ProviderTestHook = extern "C" fn(provider: *const c_char);
 type PlacementHook = extern "C" fn(mode: *const c_char);
 type ClipTextHook = extern "C" fn(text: *const c_char);
+type ImageHook = extern "C" fn(path: *const c_char);
 type RefreshHook = extern "C" fn();
 
 #[allow(dead_code)]
@@ -36,6 +37,7 @@ extern "C" {
     fn super_v_ui_set_placement_hook(cb: PlacementHook);
     fn super_v_ui_set_placement(mode: *const c_char);
     fn super_v_ui_set_clipboard_hook(cb: ClipTextHook);
+    fn super_v_ui_set_image_hook(cb: ImageHook);
     fn super_v_ui_set_refresh_hook(cb: RefreshHook);
     fn super_v_ui_set_api_key_text(key: *const c_char);
     fn super_v_ui_report_provider_test(message: *const c_char);
@@ -556,6 +558,28 @@ extern "C" fn provide_glyph_variants(glyph: *const c_char, out: *mut c_char, cap
 
 const UNIT_SEPARATOR: char = '\u{1f}';
 
+extern "C" fn on_clipboard_image(path: *const c_char) {
+    if path.is_null() {
+        return;
+    }
+    let file = unsafe { CStr::from_ptr(path) }.to_string_lossy().to_string();
+    append_log(&format!("clipboard image -> {}", file));
+    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(rt) => rt,
+        Err(_) => return,
+    };
+    rt.block_on(async {
+        if let Ok(mut client) = super_v_core::ipc_client::IpcClient::connect(SOCKET).await {
+            let _ = client
+                .send_request(&super_v_core::ipc::IpcRequest::IngestFile {
+                    mime: "image/png".to_string(),
+                    path: file,
+                })
+                .await;
+        }
+    });
+}
+
 extern "C" fn on_clipboard_text(text: *const c_char) {
     if text.is_null() {
         return;
@@ -766,6 +790,7 @@ fn main() -> Result<()> {
         super_v_ui_set_provider_test_hook(on_provider_test);
         super_v_ui_set_placement_hook(on_placement_changed);
         super_v_ui_set_clipboard_hook(on_clipboard_text);
+        super_v_ui_set_image_hook(on_clipboard_image);
         super_v_ui_set_refresh_hook(on_primary_activated);
         warm_glyph_index();
     }
