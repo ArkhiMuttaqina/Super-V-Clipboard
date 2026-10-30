@@ -145,7 +145,7 @@ fn test_localized_emoji_search_indonesian_and_english() {
 #[test]
 fn test_symbol_search_and_glyph_paging_offsets() {
     let idx = GlyphIndex::load_embedded();
-    assert_eq!(idx.emoji_count(), 1914);
+    assert_eq!(idx.emoji_count(), idx.meta().counts.entries);
     assert_eq!(idx.symbol_count(), 1073);
 
     let arrows = idx.search("symbol", "panah", "en,id", 0, 50);
@@ -158,6 +158,10 @@ fn test_symbol_search_and_glyph_paging_offsets() {
     assert_eq!(second.len(), 100);
     assert_ne!(first[0].char, second[0].char);
 
-    let tail = idx.search("emoji", "", "en,id", 1900, 100);
-    assert_eq!(tail.len(), 14);
+    // The browse grid excludes tone variants; paging must still cover every
+    // base glyph exactly once and stop at the tail.
+    let bases = idx.emoji_base_count();
+    let tail = idx.search("emoji", "", "en,id", bases - 10, 100);
+    assert_eq!(tail.len(), 10);
+    assert!(idx.search("emoji", "", "en,id", bases, 100).is_empty());
 }
