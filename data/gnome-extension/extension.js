@@ -30,6 +30,9 @@ const IFACE_XML = `
     <method name="InsertText">
       <arg type="s" name="text" direction="in"/>
     </method>
+    <method name="Build">
+      <arg type="s" name="reply" direction="out"/>
+    </method>
     <method name="Ping">
       <arg type="s" name="reply" direction="out"/>
     </method>
@@ -355,6 +358,10 @@ export default class SuperVBridgeExtension extends Extension {
     }
 
     // ---- placement ------------------------------------------------------
+
+    Build() {
+        return '2026-10-30.paste1';
+    }
 
     Ping() {
         return 'pong';
