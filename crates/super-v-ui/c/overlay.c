@@ -260,7 +260,7 @@ static void paste_file_after_hide(const char *path, const char *mime) {
     }
     GdkClipboard *cb = gdk_display_get_clipboard(d);
 
-    GdkContentProvider *providers[2];
+    GdkContentProvider *providers[3];
     int n = 0;
     gchar *data = NULL;
     gsize len = 0;
@@ -273,6 +273,18 @@ static void paste_file_after_hide(const char *path, const char *mime) {
     }
     if (texture) {
         providers[n++] = gdk_content_provider_new_typed(GDK_TYPE_TEXTURE, texture);
+    }
+    /* Third shape: the file itself. Mail clients, chat apps and file managers
+     * take a file list, browsers take image/gif bytes, editors take the texture. */
+    {
+        GFile *file = g_file_new_for_path(path);
+        if (file) {
+            GSList *list = g_slist_append(NULL, file);
+            GdkFileList *file_list = gdk_file_list_new_from_list(list);
+            if (file_list) {
+                providers[n++] = gdk_content_provider_new_typed(GDK_TYPE_FILE_LIST, file_list);
+            }
+        }
     }
 
     if (n > 0) {
