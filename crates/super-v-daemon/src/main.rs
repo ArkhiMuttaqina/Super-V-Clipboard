@@ -102,6 +102,14 @@ async fn main() -> Result<()> {
     let local_gifs = gif_scanner.scan_local_gifs(10);
     log::info!("Local GIF scan complete, count: {}", local_gifs.len());
 
+    // Test pointer cursor positioning and monitor clamping math
+    let mon = super_v_core::positioning::Rect { x: 0, y: 0, width: 1920, height: 1080 };
+    let pt = super_v_core::positioning::Point { x: 1850, y: 1000 };
+    let clamped_pos = super_v_core::positioning::WindowPlacer::compute_position(pt, (420, 520), mon, 12);
+    assert!(clamped_pos.x + 420 <= 1920, "Clamped X must fit monitor");
+    assert!(clamped_pos.y + 520 <= 1080, "Clamped Y must fit monitor");
+
+    println!("VERIFY: pointer_positioning_ok=true, clamped_x={}, clamped_y={}", clamped_pos.x, clamped_pos.y);
     println!("VERIFY: full_glyphs_embedded=true, emojis=1914, kaomojis=83, symbols=1073");
     println!("VERIFY: secret_filter_verified=true, token_masked={}", super_v_core::SecretFilter::mask_preview("ghp_1234567890abcdefghijklmnopqrstuvwxyz"));
     println!("VERIFY: gif_scanner_ok=true, found_gifs={}", local_gifs.len());

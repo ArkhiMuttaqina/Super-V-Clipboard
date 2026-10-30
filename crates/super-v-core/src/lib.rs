@@ -7,6 +7,7 @@ pub mod gif_scanner;
 pub mod glyphs;
 pub mod ipc;
 pub mod ipc_client;
+pub mod positioning;
 pub mod secret_filter;
 
 use anyhow::Result;
@@ -17,6 +18,7 @@ use std::path::Path;
 pub use blob_store::BlobStore;
 pub use classifier::ContentCategory;
 pub use gif_scanner::{GifItem, GifScanner};
+pub use positioning::{Point, Rect, WindowPlacer};
 pub use secret_filter::SecretFilter;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
