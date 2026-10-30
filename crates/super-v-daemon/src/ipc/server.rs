@@ -110,6 +110,19 @@ impl IpcServer {
                         Err(e) => IpcResponse::Error(e.to_string()),
                     }
                 }
+                Ok(IpcRequest::Ingest { mime, text }) => {
+                    let mut db = db.lock().await;
+                    match db.insert_or_touch(&mime, text.as_bytes(), Some(text.as_str())) {
+                        Ok(_) => IpcResponse::Ack,
+                        Err(e) => IpcResponse::Error(e.to_string()),
+                    }
+                }
+                Ok(IpcRequest::InjectPaste) => {
+                    match injector.paste() {
+                        Ok(_) => IpcResponse::Ack,
+                        Err(e) => IpcResponse::Error(format!("Paste injection failed: {}", e)),
+                    }
+                }
                 Ok(IpcRequest::PasteItem { id }) => {
                     match injector.paste() {
                         Ok(_) => {

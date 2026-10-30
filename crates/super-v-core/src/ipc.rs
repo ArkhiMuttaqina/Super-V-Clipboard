@@ -20,6 +20,10 @@ pub enum IpcRequest {
     Search { query: String, limit: usize },
     /// Enforce storage retention limits
     EnforceRetention { max_count: usize, max_bytes: usize },
+    /// Store text captured by the UI process (which owns the Wayland clipboard)
+    Ingest { mime: String, text: String },
+    /// Inject Ctrl+V into the focused application without a history row
+    InjectPaste,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

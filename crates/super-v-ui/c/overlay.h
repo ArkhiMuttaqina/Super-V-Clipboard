@@ -22,6 +22,10 @@ typedef void (*ActivateHook)(void);
 typedef void (*LanguageHook)(const char *langs);   /* e.g. "en,id" */
 typedef void (*GifProviderHook)(const char *id);   /* "local", "tenor", ... */
 typedef void (*GifReloadHook)(void);
+typedef void (*ApiKeyHook)(const char *key);
+typedef void (*ProviderTestHook)(const char *provider);
+typedef void (*PlacementHook)(const char *mode);
+typedef void (*ClipTextHook)(const char *text);
 
 void super_v_ui_set_paste_callback(PasteCallback cb);
 void super_v_ui_set_pin_callback(PinCallback cb);
@@ -31,10 +35,19 @@ void super_v_ui_set_activate_hook(ActivateHook cb);
 void super_v_ui_set_language_hook(LanguageHook cb);
 void super_v_ui_set_gif_provider_hook(GifProviderHook cb);
 void super_v_ui_set_gif_reload_hook(GifReloadHook cb);
+void super_v_ui_set_api_key_hook(ApiKeyHook cb);
+void super_v_ui_set_provider_test_hook(ProviderTestHook cb);
+void super_v_ui_set_placement_hook(PlacementHook cb);
+void super_v_ui_set_placement(const char *mode);
+void super_v_ui_set_clipboard_hook(ClipTextHook cb);
 
 /* Called from Rust after the hooks are installed, so the C side can reflect
    the persisted preferences in its widgets. */
 void super_v_ui_apply_preferences(const char *langs, const char *gif_provider);
+void super_v_ui_set_api_key_text(const char *key);
+void super_v_ui_report_provider_test(const char *message);
+void super_v_ui_set_log_path(const char *path);
+void super_v_ui_show_debug(void);
 
 int super_v_ui_run_app(int argc, char **argv);
 int super_v_ui_test_prewarm(char *version_buf, int max_len);

@@ -21,6 +21,8 @@ static GtkWidget *g_recent_emoji_flow = NULL;
 static GtkWidget *g_symbol_flow = NULL;
 static GtkWidget *g_gif_flow = NULL;
 static GtkWidget *g_gif_label = NULL;
+static gboolean g_skip_change = FALSE;
+static ClipTextHook g_clip_hook = NULL;
 
 static GtkWidget *g_lang_combo = NULL;
 static GtkWidget *g_gif_combo = NULL;
@@ -33,6 +35,9 @@ static ActivateHook g_activate_hook = NULL;
 static LanguageHook g_language_hook = NULL;
 static GifProviderHook g_gif_provider_hook = NULL;
 static GifReloadHook g_gif_reload_hook = NULL;
+static ApiKeyHook g_api_key_hook = NULL;
+static ProviderTestHook g_provider_test_hook = NULL;
+static char g_api_key[256] = "";
 
 static int g_offset_emoji = 0;
 static int g_offset_symbol = 0;
@@ -47,11 +52,21 @@ static char g_gif_provider[32] = "local";
 static guint g_idle_exit_source = 0;
 static gboolean g_loading_page = FALSE;
 static gboolean g_setting_entry = FALSE;
+static gboolean g_setting_combo = FALSE;
+static GtkWidget *g_fixed = NULL;
+static GtkWidget *g_card = NULL;
+static int g_placement_pointer = 0;
+static int g_place_retries = 0;
+static PlacementHook g_placement_hook = NULL;
 
 static void hide_main_window(void);
 static void cancel_idle_exit(void);
 static void schedule_idle_exit(void);
 static GtkWidget *make_thumb(const char *path, int size);
+static void select_combo(GtkWidget *combo, guint idx);
+static gboolean position_card_idle(gpointer data);
+static void position_card(void);
+static void on_placement_changed(GObject *obj, GParamSpec *pspec, gpointer user_data);
 static void reload_glyphs(const char *tab);
 
 void super_v_ui_set_paste_callback(PasteCallback cb) { g_paste_cb = cb; }
@@ -62,6 +77,9 @@ void super_v_ui_set_activate_hook(ActivateHook cb) { g_activate_hook = cb; }
 void super_v_ui_set_language_hook(LanguageHook cb) { g_language_hook = cb; }
 void super_v_ui_set_gif_provider_hook(GifProviderHook cb) { g_gif_provider_hook = cb; }
 void super_v_ui_set_gif_reload_hook(GifReloadHook cb) { g_gif_reload_hook = cb; }
+void super_v_ui_set_api_key_hook(ApiKeyHook cb) { g_api_key_hook = cb; }
+void super_v_ui_set_provider_test_hook(ProviderTestHook cb) { g_provider_test_hook = cb; }
+void super_v_ui_set_placement_hook(PlacementHook cb) { g_placement_hook = cb; }
 
 static void free_closure_data(gpointer data, GClosure *closure) { (void)closure; g_free(data); }
 
@@ -71,7 +89,9 @@ static void install_css(void) {
         ".emoji-cell { font-size: 26px; min-width: 48px; min-height: 48px; padding: 0; }\n"
         ".symbol-cell { font-size: 20px; min-width: 44px; min-height: 44px; padding: 0; }\n"
         ".gif-cell { padding: 0; }\n"
-        ".gif-cell image { border-radius: 8px; }\n";
+        ".gif-cell image { border-radius: 8px; }\n"
+        ".superv-overlay { background: transparent; }\n"
+        ".superv-card { background-color: @window_bg_color; border-radius: 14px; border: 1px solid @borders; box-shadow: 0 8px 28px rgba(0,0,0,0.35); }\n";
     gtk_css_provider_load_from_string(p, css);
     gtk_style_context_add_provider_for_display(gdk_display_get_default(),
         GTK_STYLE_PROVIDER(p), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
@@ -81,7 +101,35 @@ static void install_css(void) {
 static void copy_text_to_clipboard(const char *text) {
     GdkDisplay *d = gdk_display_get_default();
     if (!d) return;
+    g_skip_change = TRUE;
     gdk_clipboard_set_text(gdk_display_get_clipboard(d), text);
+}
+
+/* --------------------------------------------------------- clipboard watch */
+
+void super_v_ui_set_clipboard_hook(ClipTextHook cb) { g_clip_hook = cb; }
+
+static void on_clipboard_text_ready(GObject *source, GAsyncResult *res, gpointer data) {
+    (void)data;
+    GError *err = NULL;
+    char *text = gdk_clipboard_read_text_finish(GDK_CLIPBOARD(source), res, &err);
+    if (!text) {
+        if (err) g_error_free(err);
+        return;
+    }
+    if (g_clip_hook && *text) {
+        g_clip_hook(text);
+    }
+    g_free(text);
+}
+
+static void on_clipboard_changed(GdkClipboard *clipboard, gpointer data) {
+    (void)data;
+    if (g_skip_change) {
+        g_skip_change = FALSE;
+        return;
+    }
+    gdk_clipboard_read_text_async(clipboard, NULL, on_clipboard_text_ready, NULL);
 }
 
 /* ---------------------------------------------------------------- history */
@@ -512,6 +560,7 @@ static const char *langs_for_index(int idx) {
 
 static void on_lang_changed(GObject *obj, GParamSpec *pspec, gpointer user_data) {
     (void)pspec; (void)user_data;
+    if (g_setting_combo) return;
     guint idx = adw_combo_row_get_selected(ADW_COMBO_ROW(obj));
     const char *langs = langs_for_index((int)idx);
     g_strlcpy(g_langs, langs, sizeof(g_langs));
@@ -550,6 +599,7 @@ static const char *gif_id_for_index(int idx) {
 
 static void on_gif_provider_changed(GObject *obj, GParamSpec *pspec, gpointer user_data) {
     (void)pspec; (void)user_data;
+    if (g_setting_combo) return;
     guint idx = adw_combo_row_get_selected(ADW_COMBO_ROW(obj));
     const char *id = gif_id_for_index((int)idx);
     g_strlcpy(g_gif_provider, id, sizeof(g_gif_provider));
@@ -567,43 +617,282 @@ static void on_about_clicked(GtkButton *btn, gpointer user_data) {
     super_v_ui_show_about(user_data);
 }
 
+/* --------------------------------------------------------------- dialogs */
+
+static const char *g_api_key_provider_value(void) { return g_api_key; }
+
+static AdwDialog *g_open_dialog = NULL;
+static char g_log_path[512] = "";
+static GtkWidget *g_api_key_row = NULL;
+static GtkWidget *g_provider_test_row = NULL;
+static GtkWidget *g_log_view = NULL;
+static guint g_api_key_timeout = 0;
+
+void super_v_ui_set_api_key_text(const char *key) {
+    if (!key) return;
+    g_strlcpy(g_api_key, key, sizeof(g_api_key));
+    if (g_api_key_row) {
+        g_setting_entry = TRUE;
+        gtk_editable_set_text(GTK_EDITABLE(g_api_key_row), g_api_key);
+        g_setting_entry = FALSE;
+    }
+}
+
+void super_v_ui_set_log_path(const char *path) {
+    if (path) g_strlcpy(g_log_path, path, sizeof(g_log_path));
+}
+
+static void track_dialog(AdwDialog *dialog) {
+    g_open_dialog = dialog;
+    g_signal_connect_swapped(dialog, "closed", G_CALLBACK(g_nullify_pointer), &g_open_dialog);
+}
+
+static void close_open_dialog(void) {
+    if (g_open_dialog) {
+        adw_dialog_close(g_open_dialog);
+        g_open_dialog = NULL;
+    }
+}
+
+/* --------------------------------------------------------------------- logs */
+
+static GtkWidget *build_log_view(void) {
+    GtkWidget *view = gtk_text_view_new();
+    gtk_text_view_set_editable(GTK_TEXT_VIEW(view), FALSE);
+    gtk_text_view_set_monospace(GTK_TEXT_VIEW(view), TRUE);
+    gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(view), GTK_WRAP_WORD_CHAR);
+    gtk_widget_add_css_class(view, "card");
+    gtk_widget_set_margin_start(view, 8);
+    gtk_widget_set_margin_end(view, 8);
+    gtk_widget_set_margin_bottom(view, 8);
+    return view;
+}
+
+static void refresh_log_view(void) {
+    if (!g_log_view) return;
+    GtkTextBuffer *buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(g_log_view));
+    if (g_log_path[0] == 0) {
+        gtk_text_buffer_set_text(buf, "No log path configured.", -1);
+        return;
+    }
+    gchar *contents = NULL;
+    if (g_file_get_contents(g_log_path, &contents, NULL, NULL)) {
+        gsize len = strlen(contents);
+        /* keep the tail: the debug window is for the last few hundred lines */
+        const gsize cap = 120 * 1024;
+        const char *start = contents;
+        if (len > cap) start = contents + (len - cap);
+        gtk_text_buffer_set_text(buf, start, -1);
+        g_free(contents);
+    } else {
+        gchar *msg = g_strdup_printf("Log file not created yet: %s", g_log_path);
+        gtk_text_buffer_set_text(buf, msg, -1);
+        g_free(msg);
+    }
+
+    GtkTextIter end;
+    gtk_text_buffer_get_end_iter(buf, &end);
+    gtk_text_buffer_place_cursor(buf, &end);
+}
+
+static void on_log_refresh(GtkButton *btn, gpointer data) {
+    (void)btn; (void)data;
+    refresh_log_view();
+}
+
+static void on_log_copy(GtkButton *btn, gpointer data) {
+    (void)btn; (void)data;
+    if (!g_log_view) return;
+    GtkTextBuffer *buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(g_log_view));
+    GtkTextIter start, end;
+    gtk_text_buffer_get_bounds(buf, &start, &end);
+    gchar *text = gtk_text_buffer_get_text(buf, &start, &end, FALSE);
+    copy_text_to_clipboard(text);
+    g_free(text);
+}
+
+static void on_log_folder(GtkButton *btn, gpointer data) {
+    (void)btn; (void)data;
+    gchar *dir = g_path_get_dirname(g_log_path[0] ? g_log_path : ".");
+    GFile *file = g_file_new_for_path(dir);
+    gchar *uri = g_file_get_uri(file);
+    gtk_show_uri(GTK_WINDOW(g_main_window), uri, GDK_CURRENT_TIME);
+    g_free(uri);
+    g_object_unref(file);
+    g_free(dir);
+}
+
+void super_v_ui_show_debug(void) {
+    AdwDialog *dialog = ADW_DIALOG(adw_dialog_new());
+    adw_dialog_set_title(dialog, "Debug and Logs");
+    adw_dialog_set_content_width(dialog, 620);
+    adw_dialog_set_content_height(dialog, 520);
+
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    adw_dialog_set_child(dialog, box);
+
+    GtkWidget *header = adw_header_bar_new();
+    GtkWidget *refresh_btn = gtk_button_new_from_icon_name("view-refresh-symbolic");
+    gtk_widget_set_tooltip_text(refresh_btn, "Reload log");
+    gtk_widget_add_css_class(refresh_btn, "flat");
+    g_signal_connect(refresh_btn, "clicked", G_CALLBACK(on_log_refresh), NULL);
+    adw_header_bar_pack_end(ADW_HEADER_BAR(header), refresh_btn);
+
+    GtkWidget *copy_btn = gtk_button_new_from_icon_name("edit-copy-symbolic");
+    gtk_widget_set_tooltip_text(copy_btn, "Copy all");
+    gtk_widget_add_css_class(copy_btn, "flat");
+    g_signal_connect(copy_btn, "clicked", G_CALLBACK(on_log_copy), NULL);
+    adw_header_bar_pack_end(ADW_HEADER_BAR(header), copy_btn);
+
+    GtkWidget *folder_btn = gtk_button_new_from_icon_name("folder-open-symbolic");
+    gtk_widget_set_tooltip_text(folder_btn, "Open log folder");
+    gtk_widget_add_css_class(folder_btn, "flat");
+    g_signal_connect(folder_btn, "clicked", G_CALLBACK(on_log_folder), NULL);
+    adw_header_bar_pack_end(ADW_HEADER_BAR(header), folder_btn);
+    gtk_box_append(GTK_BOX(box), header);
+
+    GtkWidget *path_lbl = gtk_label_new(g_log_path[0] ? g_log_path : "log path unknown");
+    gtk_widget_set_halign(path_lbl, GTK_ALIGN_START);
+    gtk_widget_set_margin_start(path_lbl, 12);
+    gtk_widget_set_margin_top(path_lbl, 6);
+    gtk_widget_set_margin_bottom(path_lbl, 6);
+    gtk_widget_add_css_class(path_lbl, "dim-label");
+    gtk_label_set_selectable(GTK_LABEL(path_lbl), TRUE);
+    gtk_box_append(GTK_BOX(box), path_lbl);
+
+    g_log_view = build_log_view();
+    GtkWidget *scroll = gtk_scrolled_window_new();
+    gtk_widget_set_vexpand(scroll, TRUE);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), g_log_view);
+    gtk_box_append(GTK_BOX(box), scroll);
+
+    refresh_log_view();
+    track_dialog(dialog);
+    adw_dialog_present(dialog, GTK_WIDGET(g_main_window));
+}
+
+static void on_debug_clicked(GtkButton *btn, gpointer data) {
+    (void)btn; (void)data;
+    super_v_ui_show_debug();
+}
+
+/* ---------------------------------------------------------------- provider */
+
+void super_v_ui_report_provider_test(const char *message) {
+    if (g_provider_test_row) {
+        adw_action_row_set_subtitle(ADW_ACTION_ROW(g_provider_test_row),
+            message ? message : "unknown result");
+    }
+    if (!message) return;
+    gboolean ok = g_str_has_prefix(message, "PASS");
+    GtkWidget *row = g_provider_test_row;
+    if (!row) return;
+    gtk_widget_remove_css_class(row, "success");
+    gtk_widget_remove_css_class(row, "error");
+    gtk_widget_add_css_class(row, ok ? "success" : "error");
+}
+
+static gboolean flush_api_key(gpointer data) {
+    (void)data;
+    g_api_key_timeout = 0;
+    if (g_api_key_row && g_api_key_hook) {
+        const char *text = gtk_editable_get_text(GTK_EDITABLE(g_api_key_row));
+        g_api_key_hook(text ? text : "");
+    }
+    return G_SOURCE_REMOVE;
+}
+
+static void on_api_key_changed(GtkEditable *editable, gpointer data) {
+    (void)editable; (void)data;
+    if (g_api_key_timeout) g_source_remove(g_api_key_timeout);
+    g_api_key_timeout = g_timeout_add(600, flush_api_key, NULL);
+}
+
+static void on_test_provider(GtkButton *btn, gpointer data) {
+    (void)btn; (void)data;
+    if (g_provider_test_row) {
+        adw_action_row_set_subtitle(ADW_ACTION_ROW(g_provider_test_row), "Testing\u2026");
+    }
+    if (g_provider_test_hook) g_provider_test_hook(g_gif_provider);
+}
+
+/* -------------------------------------------------------------------- about */
+
 void super_v_ui_show_about(void *parent_window) {
-    AdwDialog *about = ADW_DIALOG(adw_about_dialog_new());
-    adw_about_dialog_set_application_name(ADW_ABOUT_DIALOG(about), "Super-V Clipboard");
-    adw_about_dialog_set_application_icon(ADW_ABOUT_DIALOG(about), "edit-paste");
-    adw_about_dialog_set_developer_name(ADW_ABOUT_DIALOG(about), "Arkhi Muttaqina");
-    const char *devs[] = { "Arkhi Muttaqina <arkhi07@hotmail.co.id>", NULL };
-    adw_about_dialog_set_developers(ADW_ABOUT_DIALOG(about), devs);
-    adw_about_dialog_set_website(ADW_ABOUT_DIALOG(about), "https://github.com/ArkhiMuttaqina/Super-V-Clipboard");
-    adw_about_dialog_set_issue_url(ADW_ABOUT_DIALOG(about), "https://github.com/ArkhiMuttaqina/Super-V-Clipboard/issues");
-    adw_about_dialog_set_version(ADW_ABOUT_DIALOG(about), "0.1.0");
-    adw_about_dialog_set_copyright(ADW_ABOUT_DIALOG(about), "\xc2\xa9 2026 Arkhi Muttaqina");
-    adw_about_dialog_set_license_type(ADW_ABOUT_DIALOG(about), GTK_LICENSE_GPL_3_0);
-    adw_about_dialog_set_comments(ADW_ABOUT_DIALOG(about),
-        "Clipboard manager with history, emoji, symbols and GIF search for GNOME, Hyprland and X11.");
+    (void)parent_window;
+    AdwDialog *dialog = ADW_DIALOG(adw_preferences_dialog_new());
+    adw_preferences_dialog_set_search_enabled(ADW_PREFERENCES_DIALOG(dialog), FALSE);
 
-    const char *ui_stack[] = { "GTK 4 (widget toolkit)", "libadwaita (GNOME widgets)", "GdkPixbuf (image scaling)", "Noto Color Emoji (glyph rendering)", NULL };
-    adw_about_dialog_add_credit_section(ADW_ABOUT_DIALOG(about), "User Interface", ui_stack);
+    AdwPreferencesPage *page = ADW_PREFERENCES_PAGE(adw_preferences_page_new());
+    adw_preferences_page_set_title(page, "About");
+    adw_preferences_page_set_icon_name(page, "help-about-symbolic");
+    adw_preferences_dialog_add(ADW_PREFERENCES_DIALOG(dialog), page);
 
-    const char *core_stack[] = {
-        "Rust standard library",
-        "Tokio (async runtime)",
-        "rusqlite / SQLite 3 + FTS5 (storage, full-text search)",
-        "serde + serde_json (data + settings)",
-        "sha2 (SHA-256 content addressing)",
-        "anyhow (error handling)",
-        "log + env_logger",
-        "libc",
-        NULL
+    AdwPreferencesGroup *app_group = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
+    adw_preferences_group_set_title(app_group, "Super-V Clipboard 0.1.0");
+    adw_preferences_group_set_description(app_group,
+        "Windows-style clipboard, emoji and GIF picker for GNOME, Hyprland and X11.");
+    adw_preferences_page_add(page, app_group);
+
+    static const struct { const char *title; const char *subtitle; } app_rows[] = {
+        { "Author", "Arkhi Muttaqina (arkhi07@hotmail.co.id)" },
+        { "Copyright", "\xc2\xa9 2026 Arkhi Muttaqina" },
+        { "License", "GNU General Public License v3.0 or later (GPL-3.0-or-later)" },
+        { "Repository", "github.com/ArkhiMuttaqina/Super-V-Clipboard" },
+        { "Written in", "Rust + C" },
     };
-    adw_about_dialog_add_credit_section(ADW_ABOUT_DIALOG(about), "Core Engine", core_stack);
+    for (gsize i = 0; i < G_N_ELEMENTS(app_rows); i++) {
+        GtkWidget *row = adw_action_row_new();
+        adw_preferences_row_set_use_markup(ADW_PREFERENCES_ROW(row), FALSE);
+        adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row), app_rows[i].title);
+        adw_action_row_set_subtitle(ADW_ACTION_ROW(row), app_rows[i].subtitle);
+        adw_preferences_group_add(app_group, row);
+    }
 
-    GtkWindow *parent = parent_window ? GTK_WINDOW(parent_window) : NULL;
-    adw_dialog_present(about, GTK_WIDGET(parent));
+    AdwPreferencesGroup *libs = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
+    adw_preferences_group_set_title(libs, "Bundled libraries");
+    adw_preferences_page_add(page, libs);
+
+    static const struct { const char *name; const char *why; } lib_rows[] = {
+        { "GTK 4", "widget toolkit" },
+        { "libadwaita", "GNOME widgets and dialogs" },
+        { "GdkPixbuf", "image decode and thumbnail scaling" },
+        { "Noto Color Emoji", "emoji glyph rendering" },
+        { "Tokio", "async runtime for IPC and daemon" },
+        { "rusqlite / SQLite 3 + FTS5", "storage and full-text search" },
+        { "serde + serde_json", "settings, datasets, backup format" },
+        { "sha2", "SHA-256 content addressing for blobs" },
+        { "anyhow", "error handling" },
+        { "log + env_logger", "runtime logging" },
+        { "libc", "signal and process plumbing" },
+    };
+    for (gsize i = 0; i < G_N_ELEMENTS(lib_rows); i++) {
+        GtkWidget *row = adw_action_row_new();
+        adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row), lib_rows[i].name);
+        adw_action_row_set_subtitle(ADW_ACTION_ROW(row), lib_rows[i].why);
+        adw_preferences_group_add(libs, row);
+    }
+
+    AdwPreferencesGroup *support = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
+    adw_preferences_group_set_title(support, "Troubleshooting");
+    adw_preferences_page_add(page, support);
+
+    GtkWidget *debug_row = adw_action_row_new();
+    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(debug_row), "Debug and logs");
+    adw_action_row_set_subtitle(ADW_ACTION_ROW(debug_row), "Tail this app's log, copy it, or open the log folder");
+    GtkWidget *debug_btn = gtk_button_new_with_label("Open");
+    gtk_widget_add_css_class(debug_btn, "flat");
+    gtk_widget_set_valign(debug_btn, GTK_ALIGN_CENTER);
+    g_signal_connect(debug_btn, "clicked", G_CALLBACK(on_debug_clicked), NULL);
+    adw_action_row_add_suffix(ADW_ACTION_ROW(debug_row), debug_btn);
+    adw_preferences_group_add(support, debug_row);
+
+    track_dialog(dialog);
+    adw_dialog_present(dialog, GTK_WIDGET(g_main_window));
 }
 
 void super_v_ui_show_settings(void *parent_window) {
-    GtkWindow *parent = parent_window ? GTK_WINDOW(parent_window) : NULL;
+    (void)parent_window;
     AdwDialog *dialog = ADW_DIALOG(adw_preferences_dialog_new());
     adw_preferences_dialog_set_search_enabled(ADW_PREFERENCES_DIALOG(dialog), TRUE);
 
@@ -623,14 +912,18 @@ void super_v_ui_show_settings(void *parent_window) {
     adw_combo_row_set_model(ADW_COMBO_ROW(sort_row), G_LIST_MODEL(gtk_string_list_new(sort_options)));
     adw_preferences_group_add(sort_group, sort_row);
 
-    AdwPreferencesGroup *startup_group = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
-    adw_preferences_group_set_title(startup_group, "Startup");
-    adw_preferences_page_add(page, startup_group);
-    GtkWidget *autostart_row = adw_action_row_new();
-    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(autostart_row), "Show tray / keep resident");
-    adw_action_row_set_subtitle(ADW_ACTION_ROW(autostart_row), "The overlay exits after 3 minutes hidden and restarts instantly on Super+V.");
-    adw_preferences_group_add(startup_group, autostart_row);
+    AdwPreferencesGroup *win_group = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
+    adw_preferences_group_set_title(win_group, "Window");
+    adw_preferences_group_set_description(win_group, "GNOME Wayland does not let applications position their own windows, so the near-pointer mode draws a transparent fullscreen surface and places the panel next to the cursor.");
+    adw_preferences_page_add(page, win_group);
 
+    const char *placement_options[] = { "Center of screen", "Near pointer (Wayland overlay)", NULL };
+    GtkWidget *placement_row = adw_combo_row_new();
+    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(placement_row), "Window placement");
+    adw_combo_row_set_model(ADW_COMBO_ROW(placement_row), G_LIST_MODEL(gtk_string_list_new(placement_options)));
+    select_combo(placement_row, g_placement_pointer ? 1 : 0);
+    g_signal_connect(placement_row, "notify::selected", G_CALLBACK(on_placement_changed), NULL);
+    adw_preferences_group_add(win_group, placement_row);
     /* ---- Emoji ---- */
     AdwPreferencesPage *emoji_page = ADW_PREFERENCES_PAGE(adw_preferences_page_new());
     adw_preferences_page_set_title(emoji_page, "Emoji and Symbols");
@@ -640,20 +933,15 @@ void super_v_ui_show_settings(void *parent_window) {
     AdwPreferencesGroup *lang_group = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
     adw_preferences_group_set_title(lang_group, "Search Languages");
     adw_preferences_group_set_description(lang_group,
-        "Search emoji by everyday words, not just Unicode names. Indonesian and English "
-        "dictionaries are bundled; new languages live in data/glyphs/i18n.json and can be contributed upstream.");
+        "Search emoji by everyday words. Indonesian and English dictionaries are bundled; "
+        "new languages are a data-only contribution in data/glyphs/i18n.json.");
     adw_preferences_page_add(emoji_page, lang_group);
 
-    const char *lang_options[] = {
-        "English + Indonesian (Default)",
-        "English only",
-        "Indonesian only",
-        NULL
-    };
+    const char *lang_options[] = { "English + Indonesian (Default)", "English only", "Indonesian only", NULL };
     g_lang_combo = adw_combo_row_new();
     adw_preferences_row_set_title(ADW_PREFERENCES_ROW(g_lang_combo), "Emoji search languages");
     adw_combo_row_set_model(ADW_COMBO_ROW(g_lang_combo), G_LIST_MODEL(gtk_string_list_new(lang_options)));
-    adw_combo_row_set_selected(ADW_COMBO_ROW(g_lang_combo), (guint)lang_index_for(g_langs));
+    select_combo(g_lang_combo, (guint)lang_index_for(g_langs));
     g_signal_connect(g_lang_combo, "notify::selected", G_CALLBACK(on_lang_changed), NULL);
     adw_preferences_group_add(lang_group, g_lang_combo);
 
@@ -676,23 +964,35 @@ void super_v_ui_show_settings(void *parent_window) {
 
     AdwPreferencesGroup *gif_group = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
     adw_preferences_group_set_title(gif_group, "GIF Provider");
+    adw_preferences_group_set_description(gif_group,
+        "Local works offline. Tenor/Giphy need an API key from their developer portal. "
+        "Want another provider? Send a PR upstream: github.com/ArkhiMuttaqina/Super-V-Clipboard");
     adw_preferences_page_add(gif_page, gif_group);
 
-    const char *providers[] = {
-        "Local library (~/Pictures, ~/Downloads)",
-        "Tenor API",
-        "Giphy",
-        "Klarna",
-        NULL
-    };
+    const char *providers[] = { "Local library (~/Pictures, ~/Downloads)", "Tenor API", "Giphy", "Klarna", NULL };
     g_gif_combo = adw_combo_row_new();
     adw_preferences_row_set_title(ADW_PREFERENCES_ROW(g_gif_combo), "Active provider");
-    adw_action_row_set_subtitle(ADW_ACTION_ROW(g_gif_combo),
-        "Local works offline. Online providers need an API key in ~/.config/super-v-clipboard/settings.json (gif_api_key).");
     adw_combo_row_set_model(ADW_COMBO_ROW(g_gif_combo), G_LIST_MODEL(gtk_string_list_new(providers)));
-    adw_combo_row_set_selected(ADW_COMBO_ROW(g_gif_combo), (guint)gif_index_for(g_gif_provider));
+    select_combo(g_gif_combo, (guint)gif_index_for(g_gif_provider));
     g_signal_connect(g_gif_combo, "notify::selected", G_CALLBACK(on_gif_provider_changed), NULL);
     adw_preferences_group_add(gif_group, g_gif_combo);
+
+    g_api_key_row = adw_entry_row_new();
+    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(g_api_key_row), "API key (Tenor / Giphy)");
+    gtk_editable_set_text(GTK_EDITABLE(g_api_key_row), g_api_key_provider_value());
+    g_signal_connect(g_api_key_row, "changed", G_CALLBACK(on_api_key_changed), NULL);
+    adw_preferences_group_add(gif_group, g_api_key_row);
+
+    g_provider_test_row = adw_action_row_new();
+    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(g_provider_test_row), "Test provider");
+    adw_action_row_set_subtitle(ADW_ACTION_ROW(g_provider_test_row),
+        "Runs a quick smoke test with the key above and reports what came back");
+    GtkWidget *test_btn = gtk_button_new_with_label("Test");
+    gtk_widget_add_css_class(test_btn, "flat");
+    gtk_widget_set_valign(test_btn, GTK_ALIGN_CENTER);
+    g_signal_connect(test_btn, "clicked", G_CALLBACK(on_test_provider), NULL);
+    adw_action_row_add_suffix(ADW_ACTION_ROW(g_provider_test_row), test_btn);
+    adw_preferences_group_add(gif_group, g_provider_test_row);
 
     GtkWidget *rescan_row = adw_action_row_new();
     adw_preferences_row_set_title(ADW_PREFERENCES_ROW(rescan_row), "Rescan local GIFs");
@@ -704,32 +1004,22 @@ void super_v_ui_show_settings(void *parent_window) {
     adw_action_row_add_suffix(ADW_ACTION_ROW(rescan_row), rescan_btn);
     adw_preferences_group_add(gif_group, rescan_row);
 
-    /* ---- About ---- */
-    AdwPreferencesPage *about_page = ADW_PREFERENCES_PAGE(adw_preferences_page_new());
-    adw_preferences_page_set_title(about_page, "About");
-    adw_preferences_page_set_icon_name(about_page, "help-about-symbolic");
-    adw_preferences_dialog_add(ADW_PREFERENCES_DIALOG(dialog), about_page);
+    track_dialog(dialog);
+    adw_dialog_present(dialog, GTK_WIDGET(g_main_window));
+}
 
-    AdwPreferencesGroup *about_group = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
-    adw_preferences_page_add(about_page, about_group);
-    GtkWidget *about_row = adw_action_row_new();
-    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(about_row), "About Super-V Clipboard");
-    adw_action_row_set_subtitle(ADW_ACTION_ROW(about_row), "Version, license, credits and bundled libraries");
-    GtkWidget *about_btn = gtk_button_new_with_label("Open");
-    gtk_widget_add_css_class(about_btn, "flat");
-    gtk_widget_set_valign(about_btn, GTK_ALIGN_CENTER);
-    g_signal_connect(about_btn, "clicked", G_CALLBACK(on_about_clicked), parent);
-    adw_action_row_add_suffix(ADW_ACTION_ROW(about_row), about_btn);
-    adw_preferences_group_add(about_group, about_row);
-
-    adw_dialog_present(dialog, GTK_WIDGET(parent));
+static void select_combo(GtkWidget *combo, guint idx) {
+    if (!combo) return;
+    g_setting_combo = TRUE;
+    adw_combo_row_set_selected(ADW_COMBO_ROW(combo), idx);
+    g_setting_combo = FALSE;
 }
 
 void super_v_ui_apply_preferences(const char *langs, const char *gif_provider) {
     if (langs && *langs) g_strlcpy(g_langs, langs, sizeof(g_langs));
     if (gif_provider && *gif_provider) g_strlcpy(g_gif_provider, gif_provider, sizeof(g_gif_provider));
-    if (g_lang_combo) adw_combo_row_set_selected(ADW_COMBO_ROW(g_lang_combo), (guint)lang_index_for(g_langs));
-    if (g_gif_combo) adw_combo_row_set_selected(ADW_COMBO_ROW(g_gif_combo), (guint)gif_index_for(g_gif_provider));
+    select_combo(g_lang_combo, (guint)lang_index_for(g_langs));
+    select_combo(g_gif_combo, (guint)gif_index_for(g_gif_provider));
 }
 
 /* ------------------------------------------------------------------ window */
@@ -767,6 +1057,7 @@ static void cancel_idle_exit(void) {
 
 static void hide_main_window(void) {
     if (!g_main_window) return;
+    close_open_dialog();
     gtk_widget_set_visible(g_main_window, FALSE);
     schedule_idle_exit();
     malloc_trim(0);
@@ -784,6 +1075,8 @@ static gboolean on_toggle_signal(gpointer data) {
     cancel_idle_exit();
     gtk_widget_set_visible(g_main_window, TRUE);
     gtk_window_present(GTK_WINDOW(g_main_window));
+    g_timeout_add(60, position_card_idle, NULL);
+    gtk_widget_grab_focus(g_search_entry);
     return G_SOURCE_CONTINUE;
 }
 
@@ -892,6 +1185,17 @@ static gboolean run_selftest(gpointer data) {
     super_v_ui_show_about(g_main_window);
     printf("VERIFY: preferences_dialog_ok=true\n");
     printf("VERIFY: about_dialog_ok=true\n");
+    super_v_ui_show_about(g_main_window);
+    printf("VERIFY: about_single_page_ok=true\n");
+    super_v_ui_show_debug();
+    printf("VERIFY: debug_window_ok=true\n");
+    if (g_provider_test_hook) g_provider_test_hook("local");
+    if (g_provider_test_row) printf("VERIFY: provider_test_ok=true, result=%s\n",
+        adw_action_row_get_subtitle(ADW_ACTION_ROW(g_provider_test_row)));
+    if (g_getenv("SUPER_V_SELFTEST_APIKEY") && g_api_key_hook) {
+        g_api_key_hook("smoke-key-1234");
+        printf("VERIFY: api_key_hook_called=true\n");
+    }
     printf("VERIFY: no_crash=true\n");
     fflush(stdout);
     g_application_quit(G_APPLICATION(g_application_get_default()));
@@ -913,11 +1217,177 @@ static const GActionEntry app_entries[] = {
     { "about", on_about_action, NULL, NULL, NULL },
 };
 
+/* ---- Global pointer fallback -------------------------------------------------
+ * A Wayland client cannot query the pointer until it has received motion over
+ * its own surface, so a freshly presented overlay reports -1,-1. XWayland keeps
+ * the X pointer in sync with the compositor cursor, so we read it through
+ * libX11 (dlopen, no hard link) and convert global to surface coordinates.
+ */
+#include <dlfcn.h>
+
+typedef struct _XDisplay SuperVXDisplay;
+typedef unsigned long SuperVXWindow;
+
+typedef SuperVXDisplay *(*XOpenDisplayFn)(const char *);
+typedef SuperVXWindow (*XDefaultRootWindowFn)(SuperVXDisplay *);
+typedef int (*XQueryPointerFn)(SuperVXDisplay *, SuperVXWindow, SuperVXWindow *, SuperVXWindow *, int *, int *, int *, int *, unsigned int *);
+
+static gboolean x11_query_pointer(int *out_x, int *out_y) {
+    static gboolean tried = FALSE;
+    static XOpenDisplayFn p_open = NULL;
+    static XDefaultRootWindowFn p_root = NULL;
+    static XQueryPointerFn p_query = NULL;
+    static SuperVXDisplay *display = NULL;
+
+    if (!tried) {
+        tried = TRUE;
+        void *lib = dlopen("libX11.so.6", RTLD_LAZY);
+        if (lib) {
+            p_open = (XOpenDisplayFn)dlsym(lib, "XOpenDisplay");
+            p_root = (XDefaultRootWindowFn)dlsym(lib, "XDefaultRootWindow");
+            p_query = (XQueryPointerFn)dlsym(lib, "XQueryPointer");
+        }
+    }
+    if (!p_open || !p_root || !p_query) return FALSE;
+
+    if (!display) {
+        display = p_open(NULL);
+        if (!display) return FALSE;
+    }
+
+    SuperVXWindow root = p_root(display);
+    SuperVXWindow root_ret = 0, child_ret = 0;
+    int root_x = 0, root_y = 0, win_x = 0, win_y = 0;
+    unsigned int mask = 0;
+    if (!p_query(display, root, &root_ret, &child_ret, &root_x, &root_y, &win_x, &win_y, &mask)) {
+        return FALSE;
+    }
+    *out_x = root_x;
+    *out_y = root_y;
+    return TRUE;
+}
+
+static void position_card(void) {
+    gboolean dbg = g_getenv("SUPER_V_DEBUG_PLACEMENT") != NULL;
+    if (dbg) g_printerr("PLACE enter win=%p fixed=%p card=%p ptr_mode=%d\n", (void*)g_main_window, (void*)g_fixed, (void*)g_card, g_placement_pointer);
+    if (!g_main_window || !g_fixed || !g_card) return;
+    GtkWindow *win = GTK_WINDOW(g_main_window);
+
+    if (!g_placement_pointer) {
+        if (gtk_window_is_fullscreen(win)) gtk_window_unfullscreen(win);
+        gtk_window_set_resizable(win, FALSE);
+        gtk_window_set_default_size(win, 420, 520);
+        gtk_fixed_move(GTK_FIXED(g_fixed), g_card, 0, 0);
+        return;
+    }
+
+    gtk_window_set_resizable(win, TRUE);
+    if (!gtk_window_is_fullscreen(win)) gtk_window_fullscreen(win);
+    GdkSurface *surf = gtk_native_get_surface(GTK_NATIVE(g_main_window));
+    if (!surf) { if (dbg) g_printerr("PLACE no surface\n"); return; }
+    int sw = gdk_surface_get_width(surf);
+    int sh = gdk_surface_get_height(surf);
+    if (dbg) g_printerr("PLACE surface=%dx%d fs=%d\n", sw, sh, gtk_window_is_fullscreen(win));
+    GdkMonitor *surf_mon = gdk_display_get_monitor_at_surface(gdk_surface_get_display(surf), surf);
+    int mon_w = 0, mon_h = 0;
+    if (surf_mon) {
+        GdkRectangle mg;
+        gdk_monitor_get_geometry(surf_mon, &mg);
+        mon_w = mg.width;
+        mon_h = mg.height;
+    }
+    if (sw <= 1 || sh <= 1 || (mon_w > 0 && (sw < mon_w - 2 || sh < mon_h - 2))) {
+        if (g_place_retries++ < 40) g_timeout_add(25, position_card_idle, NULL);
+        return;
+    }
+
+    double px = -1, py = -1;
+    GdkDisplay *dpy = gdk_surface_get_display(surf);
+    GdkSeat *seat = gdk_display_get_default_seat(dpy);
+    GdkDevice *ptr = seat ? gdk_seat_get_pointer(seat) : NULL;
+    if (ptr) {
+        GdkModifierType mask = 0;
+        gdk_surface_get_device_position(surf, ptr, &px, &py, &mask);
+    }
+    if (px < 0 || py < 0) {
+        int gx = 0, gy = 0;
+        if (x11_query_pointer(&gx, &gy)) {
+            GdkMonitor *mon = gdk_display_get_monitor_at_surface(dpy, surf);
+            if (mon) {
+                GdkRectangle geo;
+                gdk_monitor_get_geometry(mon, &geo);
+                px = gx - geo.x;
+                py = gy - geo.y;
+            }
+        }
+    }
+
+    if (px < 0 || py < 0) {
+        if (g_place_retries++ < 40) g_timeout_add(25, position_card_idle, NULL);
+        return;
+    }
+    g_place_retries = 0;
+
+    const int gap = 12;
+    int x = (int)px + 18;
+    int y = (int)py + 18;
+    if (x + 420 + gap > sw) x = (int)px - 420 - 18;
+    if (y + 520 + gap > sh) y = (int)py - 520 - 18;
+    if (x < gap) x = gap;
+    if (y < gap) y = gap;
+    if (x > sw - 420 - gap) x = sw - 420 - gap;
+    if (y > sh - 520 - gap) y = sh - 520 - gap;
+
+    gtk_fixed_move(GTK_FIXED(g_fixed), g_card, x, y);
+    if (g_getenv("SUPER_V_DEBUG_PLACEMENT")) {
+        g_printerr("PLACE fullscreen=%d surface=%dx%d pointer=%.0f,%.0f card=%d,%d\n",
+            gtk_window_is_fullscreen(win), sw, sh, px, py, x, y);
+    }
+}
+
+static gboolean position_card_idle(gpointer data) {
+    (void)data;
+    position_card();
+    return G_SOURCE_REMOVE;
+}
+
+void super_v_ui_set_placement(const char *mode) {
+    g_placement_pointer = (mode && strcmp(mode, "pointer") == 0);
+    g_place_retries = 0;
+    if (g_main_window && gtk_widget_get_visible(g_main_window)) {
+        position_card();
+    }
+}
+
+static void on_placement_changed(GObject *obj, GParamSpec *pspec, gpointer user_data) {
+    (void)pspec; (void)user_data;
+    if (g_setting_combo) return;
+    guint idx = adw_combo_row_get_selected(ADW_COMBO_ROW(obj));
+    const char *mode = (idx == 1) ? "pointer" : "center";
+    g_placement_pointer = (idx == 1);
+    if (g_placement_hook) g_placement_hook(mode);
+    position_card();
+}
+
+static void on_background_click(GtkGestureClick *gesture, int n_press, double x, double y, gpointer data) {
+    (void)n_press; (void)data;
+    if (!g_placement_pointer || !g_card) return;
+    graphene_rect_t bounds;
+    if (!gtk_widget_compute_bounds(g_card, GTK_WIDGET(g_main_window), &bounds)) return;
+    gboolean inside = x >= bounds.origin.x && y >= bounds.origin.y &&
+        x <= bounds.origin.x + bounds.size.width && y <= bounds.origin.y + bounds.size.height;
+    if (!inside) {
+        hide_main_window();
+        gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
+    }
+}
+
 static GtkWidget *create_main_window(AdwApplication *app) {
     GtkWidget *window = adw_application_window_new(GTK_APPLICATION(app));
     gtk_window_set_title(GTK_WINDOW(window), "Super-V Clipboard");
     gtk_window_set_default_size(GTK_WINDOW(window), 420, 520);
-    gtk_window_set_resizable(GTK_WINDOW(window), FALSE);
+    /* Resizable so the pointer-placement mode can expand to a fullscreen surface. */
+    gtk_window_set_resizable(GTK_WINDOW(window), TRUE);
     g_signal_connect(window, "close-request", G_CALLBACK(on_close_request), NULL);
 
     GtkEventController *key_ctrl = gtk_event_controller_key_new();
@@ -925,7 +1395,23 @@ static GtkWidget *create_main_window(AdwApplication *app) {
     gtk_widget_add_controller(window, key_ctrl);
 
     GtkWidget *main_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    adw_application_window_set_content(ADW_APPLICATION_WINDOW(window), main_box);
+    gtk_widget_add_css_class(main_box, "superv-card");
+    gtk_widget_set_size_request(main_box, 420, 520);
+    g_card = main_box;
+
+    g_fixed = gtk_fixed_new();
+    adw_application_window_set_content(ADW_APPLICATION_WINDOW(window), g_fixed);
+    gtk_fixed_put(GTK_FIXED(g_fixed), main_box, 0, 0);
+
+    GtkGesture *bg_click = gtk_gesture_click_new();
+    gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(bg_click), GTK_PHASE_CAPTURE);
+    g_signal_connect(bg_click, "pressed", G_CALLBACK(on_background_click), NULL);
+    gtk_widget_add_controller(window, GTK_EVENT_CONTROLLER(bg_click));
+
+    if (g_placement_pointer) {
+        gtk_widget_add_css_class(window, "superv-overlay");
+    }
+
 
     g_stack = adw_view_stack_new();
     gtk_widget_set_vexpand(g_stack, TRUE);
@@ -1076,15 +1562,20 @@ static void on_app_activate(GtkApplication *app, gpointer user_data) {
         cancel_idle_exit();
         gtk_widget_set_visible(g_main_window, TRUE);
         gtk_window_present(GTK_WINDOW(g_main_window));
+    g_timeout_add(60, position_card_idle, NULL);
         return;
     }
 
     install_css();
     g_main_window = create_main_window(ADW_APPLICATION(app));
     gtk_window_present(GTK_WINDOW(g_main_window));
+    g_timeout_add(60, position_card_idle, NULL);
+    gtk_widget_grab_focus(g_search_entry);
 
     if (g_activate_hook) g_activate_hook();
 
+    GdkClipboard *clip = gdk_display_get_clipboard(gdk_display_get_default());
+    if (clip) g_signal_connect(clip, "changed", G_CALLBACK(on_clipboard_changed), NULL);
     g_unix_signal_add(SIGUSR1, on_toggle_signal, NULL);
     g_unix_signal_add(SIGUSR2, on_hide_signal, NULL);
 
