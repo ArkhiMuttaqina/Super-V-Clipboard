@@ -95,6 +95,7 @@ export default class SuperVBridgeExtension extends Extension {
             'owner-changed', this._onOwnerChanged.bind(this));
         this._timeout = 0;
         this._virtualKeyboard = null;
+        this._prevFocus = null;
     }
 
     disable() {
@@ -107,6 +108,7 @@ export default class SuperVBridgeExtension extends Extension {
             this._ownerChangedId = 0;
         }
         this._selection = null;
+        this._prevFocus = null;
         if (this._virtualKeyboard) {
             this._virtualKeyboard.run_dispose();
             this._virtualKeyboard = null;
@@ -174,9 +176,38 @@ export default class SuperVBridgeExtension extends Extension {
         }
     }
 
+    _restoreFocusThen(callback) {
+        const prev = this._prevFocus;
+        this._prevFocus = null;
+        let delay = 0;
+        if (prev && !this._matches(prev, 'Super-V Clipboard')) {
+            try {
+                prev.activate(global.get_current_time());
+                delay = 80;
+            } catch {
+                delay = 0;
+            }
+        }
+        if (delay === 0) {
+            callback();
+            return;
+        }
+        GLib.timeout_add(GLib.PRIORITY_DEFAULT, delay, () => {
+            callback();
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
     SimulatePasteAsync([mode], invocation) {
         try {
-            this._dispatchKeystroke(this._resolveRecipe(mode));
+            const recipe = this._resolveRecipe(mode);
+            this._restoreFocusThen(() => {
+                try {
+                    this._dispatchKeystroke(recipe);
+                } catch {
+                    // Nothing to recover; the next pick retries.
+                }
+            });
             invocation.return_value(null);
         } catch (e) {
             invocation.return_dbus_error(
@@ -186,7 +217,13 @@ export default class SuperVBridgeExtension extends Extension {
 
     InsertTextAsync([text], invocation) {
         try {
-            this._insertText(text);
+            this._restoreFocusThen(() => {
+                try {
+                    this._insertText(text);
+                } catch {
+                    // Nothing to recover; the caller falls back to Ctrl+V.
+                }
+            });
             invocation.return_value(null);
         } catch (e) {
             invocation.return_dbus_error(
@@ -343,6 +380,10 @@ export default class SuperVBridgeExtension extends Extension {
             winY = Math.max(workArea.y + edge, Math.min(winY,
                 workArea.y + workArea.height - rect.height - edge));
 
+            const focused = global.display.get_focus_window();
+            if (focused && focused !== metaWin) {
+                this._prevFocus = focused;
+            }
             metaWin.move_frame(true, winX, winY);
             metaWin.activate(global.get_current_time());
             return;

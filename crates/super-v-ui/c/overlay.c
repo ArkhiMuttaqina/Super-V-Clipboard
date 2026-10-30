@@ -22,6 +22,8 @@ static GtkWidget *g_symbol_flow = NULL;
 static GtkWidget *g_gif_flow = NULL;
 static GtkWidget *g_gif_label = NULL;
 static gboolean g_skip_change = FALSE;
+static guint g_restore_source = 0;
+static char *g_saved_clip = NULL;
 static ClipTextHook g_clip_hook = NULL;
 
 static GtkWidget *g_lang_combo = NULL;
@@ -62,6 +64,7 @@ static void schedule_idle_exit(void);
 static GtkWidget *make_thumb(const char *path, int size);
 static void select_combo(GtkWidget *combo, guint idx);
 static gboolean place_after_map(gpointer data);
+static void paste_after_hide(const char *text);
 static void sync_clipboard_once(void);
 static gboolean sync_clipboard_idle(gpointer data);
 static void request_pointer_placement(void);
@@ -131,6 +134,12 @@ static void on_clipboard_changed(GdkClipboard *clipboard, gpointer data) {
         g_skip_change = FALSE;
         return;
     }
+    if (g_restore_source) {
+        g_source_remove(g_restore_source);
+        g_restore_source = 0;
+        g_free(g_saved_clip);
+        g_saved_clip = NULL;
+    }
     gdk_clipboard_read_text_async(clipboard, NULL, on_clipboard_text_ready, NULL);
 }
 
@@ -145,13 +154,13 @@ static void on_row_activated(GtkListBox *box, GtkListBoxRow *row, gpointer user_
     const char *text = (const char *)g_object_get_data(G_OBJECT(row), "super_v_text");
     gint64 *pid = (gint64 *)g_object_get_data(G_OBJECT(row), "super_v_id");
     if (text && *text) {
-        super_v_ui_paste_text(text);
+        paste_after_hide(text);
     } else if (pid) {
         emit_paste((long long)*pid, NULL);
+        hide_main_window();
     } else {
         return;
     }
-    hide_main_window();
 }
 
 static void on_pin_btn_clicked(GtkButton *btn, gpointer user_data) {
@@ -325,14 +334,58 @@ void super_v_ui_insert_text(const char *text) {
     g_object_unref(bus);
 }
 
-/* Paste a picked value into the focused app. The clipboard must carry the
-   text for an instant because that is the only interface every toolkit and
-   terminal honours; the previous clipboard is restored 400 ms later, so a
-   pick never permanently changes what you copied. */
-static guint g_restore_source = 0;
-static char *g_saved_clip = NULL;
+/* Pick -> paste. The clipboard is read while the overlay still has focus (a
+   hidden Wayland client cannot read it), then the window hides, the picked
+   text is placed on the clipboard, the Shell sends Ctrl+V, and half a second
+   later the previous clipboard is restored. */
 
-static gboolean restore_clipboard(gpointer data) {
+static void simulate_paste(void);
+static void restore_clipboard_later(void);
+
+typedef struct { char *text; } PasteAction;
+
+static gboolean do_paste_action(gpointer data) {
+    PasteAction *action = (PasteAction *)data;
+    simulate_paste();
+    restore_clipboard_later();
+    g_free(action->text);
+    g_free(action);
+    return G_SOURCE_REMOVE;
+}
+
+static void on_clipboard_captured_for_paste(GObject *source, GAsyncResult *res, gpointer data) {
+    GError *err = NULL;
+    char *previous = gdk_clipboard_read_text_finish(GDK_CLIPBOARD(source), res, &err);
+    if (err) g_error_free(err);
+
+    g_free(g_saved_clip);
+    g_saved_clip = previous;
+
+    PasteAction *action = g_new0(PasteAction, 1);
+    action->text = (char *)data;
+
+    /* Set the selection while the window still has the seat: Wayland
+       rejects clipboard ownership from an unfocused client. */
+    GdkDisplay *d = gdk_display_get_default();
+    if (d && action->text) {
+        g_skip_change = TRUE;
+        gdk_clipboard_set_text(gdk_display_get_clipboard(d), action->text);
+    }
+
+    hide_main_window();
+    g_timeout_add(150, do_paste_action, action);
+}
+
+void super_v_ui_paste_text(const char *text) {
+    if (!text || !*text) return;
+    GdkDisplay *d = gdk_display_get_default();
+    if (!d) return;
+    GdkClipboard *clip = gdk_display_get_clipboard(d);
+    if (!clip) return;
+    gdk_clipboard_read_text_async(clip, NULL, on_clipboard_captured_for_paste, g_strdup(text));
+}
+
+static gboolean restore_clipboard_now(gpointer data) {
     (void)data;
     g_restore_source = 0;
     GdkDisplay *d = gdk_display_get_default();
@@ -343,6 +396,12 @@ static gboolean restore_clipboard(gpointer data) {
     g_free(g_saved_clip);
     g_saved_clip = NULL;
     return G_SOURCE_REMOVE;
+}
+
+static void restore_clipboard_later(void) {
+    if (!g_saved_clip) return;
+    if (g_restore_source) g_source_remove(g_restore_source);
+    g_restore_source = g_timeout_add(500, restore_clipboard_now, NULL);
 }
 
 static void simulate_paste(void) {
@@ -362,67 +421,21 @@ static void simulate_paste(void) {
     g_object_unref(bus);
 }
 
-static void on_saved_clip_for_paste(GObject *source, GAsyncResult *res, gpointer data) {
-    GError *rerr = NULL;
-    char *previous = gdk_clipboard_read_text_finish(GDK_CLIPBOARD(source), res, &rerr);
-    if (g_getenv("SUPER_V_DEBUG_INSERT")) g_printerr("PASTE cb previous=%s err=%s\n", previous ? previous : "(null)", rerr ? rerr->message : "none");
-    if (rerr) g_error_free(rerr);
-    const char *text = (const char *)data;
+typedef struct { char *text; } PasteLater;
 
-    g_skip_change = TRUE;
-    gdk_clipboard_set_text(GDK_CLIPBOARD(source), text);
-    simulate_paste();
-
-    g_free(g_saved_clip);
-    g_saved_clip = previous;
-    if (g_saved_clip && !g_restore_source) {
-        g_restore_source = g_timeout_add(400, restore_clipboard, NULL);
-    }
-    g_free((char *)data);
+static gboolean paste_later_cb(gpointer data) {
+    PasteLater *p = (PasteLater *)data;
+    super_v_ui_paste_text(p->text);
+    g_free(p->text);
+    g_free(p);
+    return G_SOURCE_REMOVE;
 }
 
-static void paste_via_clipboard(const char *text) {
+static void paste_after_hide(const char *text) {
     if (!text || !*text) return;
-    GdkDisplay *d = gdk_display_get_default();
-    if (!d) return;
-    GdkClipboard *clip = gdk_display_get_clipboard(d);
-    if (!clip) return;
-    gdk_clipboard_read_text_async(clip, NULL, on_saved_clip_for_paste, g_strdup(text));
-}
-
-static void on_typed_insert_done(GObject *source, GAsyncResult *res, gpointer data) {
-    char *text = (char *)data;
-    GError *err = NULL;
-    GVariant *reply = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source), res, &err);
-    if (reply) {
-        g_variant_unref(reply);
-        if (g_getenv("SUPER_V_DEBUG_INSERT")) g_printerr("INSERT typed\n");
-        g_free(text);
-        return;
-    }
-    if (g_getenv("SUPER_V_DEBUG_INSERT")) g_printerr("INSERT fallback: %s\n", err ? err->message : "?");
-    if (err) g_error_free(err);
-    paste_via_clipboard(text);
-    g_free(text);
-}
-
-void super_v_ui_paste_text(const char *text) {
-    if (!text || !*text) return;
-    GError *err = NULL;
-    GDBusConnection *bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, &err);
-    if (!bus) {
-        if (err) g_error_free(err);
-        paste_via_clipboard(text);
-        return;
-    }
-    g_dbus_connection_call(bus,
-        "my.id.arkhimuttaqina.Bridge",
-        "/my/id/arkhimuttaqina/Bridge",
-        "my.id.arkhimuttaqina.Bridge",
-        "InsertText",
-        g_variant_new("(s)", text),
-        NULL, G_DBUS_CALL_FLAGS_NONE, 2500, NULL, on_typed_insert_done, g_strdup(text));
-    g_object_unref(bus);
+    PasteLater *p = g_new0(PasteLater, 1);
+    p->text = g_strdup(text);
+    g_timeout_add(140, paste_later_cb, p);
 }
 
 static void on_glyph_clicked(GtkButton *btn, gpointer user_data) {
@@ -430,15 +443,13 @@ static void on_glyph_clicked(GtkButton *btn, gpointer user_data) {
     GtkWidget *child = btn ? gtk_widget_get_parent(GTK_WIDGET(btn)) : NULL;
     GtkWidget *flow = child ? gtk_widget_get_parent(child) : NULL;
     if (flow && flow == g_emoji_flow) super_v_ui_record_recent("emoji", glyph);
-    super_v_ui_paste_text(glyph);
-    hide_main_window();
+    paste_after_hide(glyph);
 }
 
 static void on_skin_variant_clicked(GtkButton *btn, gpointer user_data) {
     (void)btn;
     const char *variant = (const char *)user_data;
-    super_v_ui_paste_text(variant);
-    hide_main_window();
+    paste_after_hide(variant);
 }
 
 static void on_popover_closed(GtkPopover *popover, gpointer user_data) {
