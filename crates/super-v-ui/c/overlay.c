@@ -1579,24 +1579,75 @@ static gboolean sync_clipboard_idle(gpointer data) {
     return G_SOURCE_REMOVE;
 }
 
-static void on_clipboard_texture_ready(GObject *source, GAsyncResult *res, gpointer data) {
-    (void)data;
+/* Raw bytes are more reliable than decode-to-texture: the shell may hand over
+ * image/png or image/jpeg and GDK's texture path silently fails when the
+ * selection is not readable yet. */
+static const char *const IMAGE_MIMES[] = {
+    "image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp", NULL
+};
+
+static const char *ext_for_mime(const char *mime) {
+    if (!mime) return "png";
+    if (strcmp(mime, "image/jpeg") == 0) return "jpg";
+    if (strcmp(mime, "image/webp") == 0) return "webp";
+    if (strcmp(mime, "image/gif") == 0) return "gif";
+    if (strcmp(mime, "image/bmp") == 0) return "bmp";
+    return "png";
+}
+
+static void on_image_stream_ready(GObject *source, GAsyncResult *res, gpointer data) {
+    char *mime = (char *)data;
     GError *err = NULL;
-    GdkTexture *texture = gdk_clipboard_read_texture_finish(GDK_CLIPBOARD(source), res, &err);
-    if (!texture) {
-        if (err) {
-            if (g_getenv("SUPER_V_DEBUG_CLIPBOARD")) g_printerr("IMG read failed: %s\n", err->message);
-            g_error_free(err);
-        }
+    GInputStream *stream = gdk_clipboard_read_finish(GDK_CLIPBOARD(source), res, NULL, &err);
+    if (!stream) {
+        if (g_getenv("SUPER_V_DEBUG_CLIPBOARD"))
+            g_printerr("IMG stream failed: %s\n", err ? err->message : "?");
+        if (err) g_error_free(err);
+        g_free(mime);
         return;
     }
+
+    GByteArray *bytes = g_byte_array_new();
+    unsigned char chunk[65536];
+    gssize got = 0;
+    while ((got = g_input_stream_read(stream, chunk, sizeof(chunk), NULL, NULL)) > 0) {
+        g_byte_array_append(bytes, chunk, (guint)got);
+        if (bytes->len > 16 * 1024 * 1024) break;
+    }
+    g_object_unref(stream);
+
+    if (bytes->len == 0) {
+        g_byte_array_free(bytes, TRUE);
+        g_free(mime);
+        return;
+    }
+
     char path[256];
-    g_snprintf(path, sizeof(path), "/tmp/super-v-ui-clip-%" G_GINT64_FORMAT ".png",
-        (gint64)g_get_monotonic_time());
-    gdk_texture_save_to_png(texture, path);
-    g_object_unref(texture);
-    if (g_getenv("SUPER_V_DEBUG_CLIPBOARD")) g_printerr("IMG captured %s\n", path);
-    if (g_image_hook) g_image_hook(path);
+    g_snprintf(path, sizeof(path), "/tmp/super-v-ui-clip-%" G_GINT64_FORMAT ".%s",
+        (gint64)g_get_monotonic_time(), ext_for_mime(mime));
+    g_file_set_contents(path, (const char *)bytes->data, (gssize)bytes->len, NULL);
+    if (g_getenv("SUPER_V_DEBUG_CLIPBOARD"))
+        g_printerr("IMG captured %s (%u bytes, %s)\n", path, bytes->len, mime);
+    g_byte_array_free(bytes, TRUE);
+
+    if (g_image_hook) g_image_hook(path, mime);
+    g_free(mime);
+}
+
+static void read_clipboard_image(GdkClipboard *clip) {
+    GdkContentFormats *formats = gdk_clipboard_get_formats(clip);
+    if (!formats) return;
+    const char *mime = NULL;
+    for (int i = 0; IMAGE_MIMES[i]; i++) {
+        if (gdk_content_formats_contain_mime_type(formats, IMAGE_MIMES[i])) {
+            mime = IMAGE_MIMES[i];
+            break;
+        }
+    }
+    if (!mime) return;
+    const char *mimes[] = { mime, NULL };
+    gdk_clipboard_read_async(clip, mimes, G_PRIORITY_DEFAULT, NULL,
+        on_image_stream_ready, g_strdup(mime));
 }
 
 static void sync_clipboard_once(void) {
@@ -1605,7 +1656,7 @@ static void sync_clipboard_once(void) {
     GdkClipboard *clip = gdk_display_get_clipboard(d);
     if (!clip) return;
     gdk_clipboard_read_text_async(clip, NULL, on_clipboard_text_ready, NULL);
-    gdk_clipboard_read_texture_async(clip, NULL, on_clipboard_texture_ready, NULL);
+    read_clipboard_image(clip);
 }
 
 static gboolean on_toggle_signal(gpointer data) {

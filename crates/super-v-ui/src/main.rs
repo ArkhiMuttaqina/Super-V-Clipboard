@@ -18,7 +18,7 @@ type ApiKeyHook = extern "C" fn(key: *const c_char);
 type ProviderTestHook = extern "C" fn(provider: *const c_char);
 type PlacementHook = extern "C" fn(mode: *const c_char);
 type ClipTextHook = extern "C" fn(text: *const c_char);
-type ImageHook = extern "C" fn(path: *const c_char);
+type ImageHook = extern "C" fn(path: *const c_char, mime: *const c_char);
 type RefreshHook = extern "C" fn();
 
 #[allow(dead_code)]
@@ -558,11 +558,16 @@ extern "C" fn provide_glyph_variants(glyph: *const c_char, out: *mut c_char, cap
 
 const UNIT_SEPARATOR: char = '\u{1f}';
 
-extern "C" fn on_clipboard_image(path: *const c_char) {
+extern "C" fn on_clipboard_image(path: *const c_char, mime_ptr: *const c_char) {
     if path.is_null() {
         return;
     }
     let file = unsafe { CStr::from_ptr(path) }.to_string_lossy().to_string();
+    let mime = if mime_ptr.is_null() {
+        "image/png".to_string()
+    } else {
+        unsafe { CStr::from_ptr(mime_ptr) }.to_string_lossy().to_string()
+    };
     append_log(&format!("clipboard image -> {}", file));
     let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
         Ok(rt) => rt,
@@ -572,7 +577,7 @@ extern "C" fn on_clipboard_image(path: *const c_char) {
         if let Ok(mut client) = super_v_core::ipc_client::IpcClient::connect(SOCKET).await {
             let _ = client
                 .send_request(&super_v_core::ipc::IpcRequest::IngestFile {
-                    mime: "image/png".to_string(),
+                    mime,
                     path: file,
                 })
                 .await;

@@ -33,7 +33,7 @@ typedef void (*ApiKeyHook)(const char *key);
 typedef void (*ProviderTestHook)(const char *provider);
 typedef void (*PlacementHook)(const char *mode);
 typedef void (*ClipTextHook)(const char *text);
-typedef void (*ImageHook)(const char *path);
+typedef void (*ImageHook)(const char *path, const char *mime);
 
 void super_v_ui_set_paste_callback(PasteCallback cb);
 void super_v_ui_set_pin_callback(PinCallback cb);
