@@ -17,6 +17,7 @@ type ApiKeyHook = extern "C" fn(key: *const c_char);
 type ProviderTestHook = extern "C" fn(provider: *const c_char);
 type PlacementHook = extern "C" fn(mode: *const c_char);
 type ClipTextHook = extern "C" fn(text: *const c_char);
+type RefreshHook = extern "C" fn();
 
 #[allow(dead_code)]
 extern "C" {
@@ -33,6 +34,7 @@ extern "C" {
     fn super_v_ui_set_placement_hook(cb: PlacementHook);
     fn super_v_ui_set_placement(mode: *const c_char);
     fn super_v_ui_set_clipboard_hook(cb: ClipTextHook);
+    fn super_v_ui_set_refresh_hook(cb: RefreshHook);
     fn super_v_ui_set_api_key_text(key: *const c_char);
     fn super_v_ui_report_provider_test(message: *const c_char);
     fn super_v_ui_set_log_path(path: *const c_char);
@@ -702,6 +704,7 @@ fn main() -> Result<()> {
         super_v_ui_set_provider_test_hook(on_provider_test);
         super_v_ui_set_placement_hook(on_placement_changed);
         super_v_ui_set_clipboard_hook(on_clipboard_text);
+        super_v_ui_set_refresh_hook(on_primary_activated);
     }
 
     let c_args: Vec<CString> = args.iter()

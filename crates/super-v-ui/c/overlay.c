@@ -31,6 +31,7 @@ static GtkWidget *g_gif_combo = NULL;
 
 static PasteCallback g_paste_cb = NULL;
 static PinCallback g_pin_cb = NULL;
+static RefreshHook g_refresh_hook = NULL;
 static DeleteCallback g_delete_cb = NULL;
 static GlyphProvider g_glyph_provider = NULL;
 static ActivateHook g_activate_hook = NULL;
@@ -65,6 +66,7 @@ static GtkWidget *make_thumb(const char *path, int size);
 static void select_combo(GtkWidget *combo, guint idx);
 static gboolean place_after_map(gpointer data);
 static void paste_after_hide(const char *text);
+static void on_history_row_activated(AdwActionRow *row, gpointer data);
 static void sync_clipboard_once(void);
 static gboolean sync_clipboard_idle(gpointer data);
 static void request_pointer_placement(void);
@@ -73,6 +75,7 @@ static void reload_glyphs(const char *tab);
 
 void super_v_ui_set_paste_callback(PasteCallback cb) { g_paste_cb = cb; }
 void super_v_ui_set_pin_callback(PinCallback cb) { g_pin_cb = cb; }
+void super_v_ui_set_refresh_hook(RefreshHook cb) { g_refresh_hook = cb; }
 void super_v_ui_set_delete_callback(DeleteCallback cb) { g_delete_cb = cb; }
 void super_v_ui_set_glyph_provider(GlyphProvider cb) { g_glyph_provider = cb; }
 void super_v_ui_set_activate_hook(ActivateHook cb) { g_activate_hook = cb; }
@@ -151,6 +154,27 @@ static void emit_paste(long long id, const char *text) {
 
 static gint64 g_last_pick_us = 0;
 
+static gboolean refresh_history_idle(gpointer data) {
+    (void)data;
+    if (g_refresh_hook) g_refresh_hook();
+    return G_SOURCE_REMOVE;
+}
+
+/* Ignore clicks that landed on the suffix buttons (pin / delete / reveal). */
+static gboolean click_hit_button(GtkWidget *row, double x, double y) {
+    GtkWidget *hit = gtk_widget_pick(row, (int)x, (int)y, GTK_PICK_DEFAULT);
+    for (GtkWidget *w = hit; w && w != row; w = gtk_widget_get_parent(w)) {
+        if (GTK_IS_BUTTON(w)) return TRUE;
+    }
+    return FALSE;
+}
+
+static void on_row_click_released(GtkGestureClick *gesture, int n_press, double x, double y, gpointer data) {
+    (void)gesture; (void)n_press;
+    GtkWidget *row = GTK_WIDGET(data);
+    if (click_hit_button(row, x, y)) return;
+    on_history_row_activated(ADW_ACTION_ROW(row), NULL);
+}
 static void on_history_row_activated(AdwActionRow *row, gpointer data) {
     (void)data;
     gint64 now = g_get_monotonic_time();
@@ -188,6 +212,7 @@ static void on_pin_btn_clicked(GtkButton *btn, gpointer user_data) {
     GtkWidget *row = GTK_WIDGET(user_data);
     gint64 *pid = (gint64 *)g_object_get_data(G_OBJECT(row), "super_v_id");
     if (pid && g_pin_cb) g_pin_cb((long long)*pid);
+    g_idle_add(refresh_history_idle, NULL);
 }
 
 static void on_delete_btn_clicked(GtkButton *btn, gpointer user_data) {
@@ -264,6 +289,10 @@ void super_v_ui_add_history_item(const char *title, const char *subtitle, int is
 
     g_object_set_data_full(G_OBJECT(row), "super_v_text", g_strdup(title ? title : ""), g_free);
     g_signal_connect(row, "activated", G_CALLBACK(on_history_row_activated), NULL);
+    GtkGesture *row_click = gtk_gesture_click_new();
+    gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(row_click), GDK_BUTTON_PRIMARY);
+    g_signal_connect(row_click, "released", G_CALLBACK(on_row_click_released), row);
+    gtk_widget_add_controller(GTK_WIDGET(row), GTK_EVENT_CONTROLLER(row_click));
     gint64 *heap_id = g_new0(gint64, 1);
     *heap_id = (gint64)id;
     g_object_set_data_full(G_OBJECT(row), "super_v_id", heap_id, g_free);
