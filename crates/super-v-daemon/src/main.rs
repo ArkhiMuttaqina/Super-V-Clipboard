@@ -106,11 +106,15 @@ async fn main() -> Result<()> {
         log::info!("blob {} ok", bh);
 
         let glyphs = super_v_core::glyphs::GlyphIndex::load_embedded();
-        assert_eq!(glyphs.emoji_count(), 1914);
+        assert_eq!(glyphs.emoji_count(), glyphs.meta().counts.entries);
+        assert_eq!(glyphs.emoji_base_count(), glyphs.meta().counts.bases);
+        assert_eq!(glyphs.tone_variant_count(), glyphs.meta().counts.tone_variants);
         assert_eq!(glyphs.symbol_count(), 1073);
         assert!(!glyphs.search("emoji", "rocket", "en", 0, 5).is_empty());
         assert!(!glyphs.search("emoji", "sedih", "en,id", 0, 5).is_empty());
         assert!(!glyphs.search("emoji", "marah", "id", 0, 5).is_empty());
+        assert!(!glyphs.search("emoji", "warna kulit gelap", "en,id", 0, 5).is_empty());
+        assert_eq!(glyphs.tone_variants("👋").len(), 5);
 
         let gifs = super_v_core::GifScanner::default_dirs().scan_local_gifs(10);
 
@@ -128,7 +132,14 @@ async fn main() -> Result<()> {
         println!("VERIFY: gnome_bridge_installed={},", bridge);
         println!("VERIFY: backup_restore_ok=true, exported={}, imported={}", exported, imported);
         println!("VERIFY: pointer_positioning_ok=true, clamped_x={}, clamped_y={}", pos.x, pos.y);
-        println!("VERIFY: full_glyphs_embedded=true, emojis={}, symbols={}", glyphs.emoji_count(), glyphs.symbol_count());
+        println!(
+            "VERIFY: full_glyphs_embedded=true, unicode={}, emojis={}, bases={}, tone_variants={}, symbols={}",
+            glyphs.unicode_version(),
+            glyphs.emoji_count(),
+            glyphs.emoji_base_count(),
+            glyphs.tone_variant_count(),
+            glyphs.symbol_count()
+        );
 println!("VERIFY: localized_search_ok=true, langs={:?}", glyphs.available_languages());
         println!("VERIFY: secret_filter_verified=true, token_masked={}", super_v_core::SecretFilter::mask_preview("ghp_1234567890abcdefghijklmnopqrstuvwxyz"));
         println!("VERIFY: gif_scanner_ok=true, found_gifs={}", gifs.len());

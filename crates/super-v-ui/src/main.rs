@@ -9,6 +9,7 @@ type PasteCallback = extern "C" fn(id: libc::c_longlong, text: *const c_char);
 type PinCallback = extern "C" fn(id: libc::c_longlong);
 type DeleteCallback = extern "C" fn(id: libc::c_longlong);
 type GlyphProvider = extern "C" fn(tab: *const c_char, query: *const c_char, offset: c_int, limit: c_int) -> c_int;
+type GlyphVariantsProvider = extern "C" fn(glyph: *const c_char, out: *mut c_char, cap: c_int) -> c_int;
 type ActivateHook = extern "C" fn();
 type LanguageHook = extern "C" fn(langs: *const c_char);
 type GifProviderHook = extern "C" fn(id: *const c_char);
@@ -25,6 +26,7 @@ extern "C" {
     fn super_v_ui_set_pin_callback(cb: PinCallback);
     fn super_v_ui_set_delete_callback(cb: DeleteCallback);
     fn super_v_ui_set_glyph_provider(cb: GlyphProvider);
+    fn super_v_ui_set_glyph_variants_provider(cb: GlyphVariantsProvider);
     fn super_v_ui_set_activate_hook(cb: ActivateHook);
     fn super_v_ui_set_language_hook(cb: LanguageHook);
     fn super_v_ui_set_gif_provider_hook(cb: GifProviderHook);
@@ -70,6 +72,25 @@ const SOCKET: &str = "/tmp/super-v-clipboard.sock";
 fn glyph_index() -> &'static GlyphIndex {
     static IDX: OnceLock<GlyphIndex> = OnceLock::new();
     IDX.get_or_init(GlyphIndex::load_embedded)
+}
+
+/// Building the index parses ~500 KB of embedded data and composes the variant
+/// keyword tables, roughly 9 ms. Run it on a background thread at startup so the
+/// first emoji tab never pays that cost on the GTK main thread.
+fn warm_glyph_index() {
+    std::thread::spawn(|| {
+        let started = std::time::Instant::now();
+        let index = glyph_index();
+        append_log(&format!(
+            "glyph index ready: unicode={} emojis={} bases={} tone_variants={} symbols={} in {}ms",
+            index.unicode_version(),
+            index.emoji_count(),
+            index.emoji_base_count(),
+            index.tone_variant_count(),
+            index.symbol_count(),
+            started.elapsed().as_millis()
+        ));
+    });
 }
 
 /* ------------------------------------------------------------------ settings */
@@ -489,16 +510,51 @@ extern "C" fn provide_glyph_page(tab: *const c_char, query: *const c_char, offse
         let c_glyph = match CString::new(g.char.as_str()) { Ok(v) => v, Err(_) => continue };
         let c_name = CString::new(g.name.as_str()).unwrap_or_default();
         let c_kw = CString::new(g.keywords.as_str()).unwrap_or_default();
+        let capable = skin_tab && idx.has_tone_variants(&g.char);
         unsafe {
             super_v_ui_add_glyph_item(
                 c_tab.as_ptr(), c_glyph.as_ptr(), c_name.as_ptr(), c_kw.as_ptr(),
-                if skin_tab && g.tone == 1 { 1 } else { 0 },
+                if capable { 1 } else { 0 },
             );
         }
         emitted += 1;
     }
     emitted
 }
+
+/// Hands the exact RGI skin-tone variants for `glyph` to the C overlay as a
+/// 0x1F-separated list written into the caller's buffer, so the overlay never
+/// has to guess where a modifier belongs.
+extern "C" fn provide_glyph_variants(glyph: *const c_char, out: *mut c_char, cap: c_int) -> c_int {
+    if glyph.is_null() || out.is_null() || cap <= 1 {
+        return -1;
+    }
+    let base = unsafe { CStr::from_ptr(glyph) }.to_string_lossy().to_string();
+    let idx = glyph_index();
+    let mut joined = String::new();
+    for variant in idx.tone_variants(&base) {
+        if !joined.is_empty() {
+            joined.push(UNIT_SEPARATOR);
+        }
+        joined.push_str(&variant.char);
+    }
+    if joined.is_empty() {
+        return -1;
+    }
+    let bytes = joined.as_bytes();
+    let cap = cap as usize;
+    let mut n = bytes.len().min(cap - 1);
+    while n > 0 && n < bytes.len() && (bytes[n] & 0xC0) == 0x80 {
+        n -= 1;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), out as *mut u8, n);
+        *out.add(n) = 0;
+    }
+    n as c_int
+}
+
+const UNIT_SEPARATOR: char = '\u{1f}';
 
 extern "C" fn on_clipboard_text(text: *const c_char) {
     if text.is_null() {
@@ -701,6 +757,7 @@ fn main() -> Result<()> {
         super_v_ui_set_pin_callback(on_pin_toggled);
         super_v_ui_set_delete_callback(on_delete_item);
         super_v_ui_set_glyph_provider(provide_glyph_page);
+        super_v_ui_set_glyph_variants_provider(provide_glyph_variants);
         super_v_ui_set_activate_hook(on_primary_activated);
         super_v_ui_set_language_hook(on_language_changed);
         super_v_ui_set_gif_provider_hook(on_gif_provider_changed);
@@ -710,6 +767,7 @@ fn main() -> Result<()> {
         super_v_ui_set_placement_hook(on_placement_changed);
         super_v_ui_set_clipboard_hook(on_clipboard_text);
         super_v_ui_set_refresh_hook(on_primary_activated);
+        warm_glyph_index();
     }
 
     let c_args: Vec<CString> = args.iter()

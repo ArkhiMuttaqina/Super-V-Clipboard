@@ -16,6 +16,12 @@ typedef void (*DeleteCallback)(long long id);
    for each emitted row and return how many it emitted. */
 typedef int (*GlyphProvider)(const char *tab, const char *query, int offset, int limit);
 
+/* Skin-tone variants for one glyph: exact RGI sequences separated by 0x1F,
+   written into caller-provided storage. Returns bytes written (excluding the
+   NUL), or -1 when the glyph has no variants. The UI never composes a variant
+   itself; multi-person sequences need two modifiers in the right slots. */
+typedef int (*GlyphVariantsProvider)(const char *glyph, char *out, int cap);
+
 /* Runs once, only in the primary instance, after the window is built. */
 typedef void (*ActivateHook)(void);
 
@@ -33,6 +39,7 @@ void super_v_ui_set_pin_callback(PinCallback cb);
 void super_v_ui_set_refresh_hook(RefreshHook cb);
 void super_v_ui_set_delete_callback(DeleteCallback cb);
 void super_v_ui_set_glyph_provider(GlyphProvider cb);
+void super_v_ui_set_glyph_variants_provider(GlyphVariantsProvider cb);
 void super_v_ui_set_activate_hook(ActivateHook cb);
 void super_v_ui_set_language_hook(LanguageHook cb);
 void super_v_ui_set_gif_provider_hook(GifProviderHook cb);
