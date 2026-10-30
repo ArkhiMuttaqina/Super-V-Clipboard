@@ -130,7 +130,7 @@ static void install_css(void) {
         ".emoji-cell { font-size: 25px; min-width: 44px; min-height: 44px; padding: 0; }\n"
         ".symbol-cell { font-size: 20px; min-width: 44px; min-height: 44px; padding: 0; }\n"
         ".gif-cell { padding: 0; }\n"
-        ".gif-cell image { -gtk-icon-size: 84px; border-radius: 8px; }\n"
+        ".gif-cell image, .gif-cell picture { -gtk-icon-size: 84px; border-radius: 8px; }\n"
         ".superv-overlay { background: transparent; }\n"
         ".section-row { background: transparent; box-shadow: none; border: none; padding: 0; min-height: 0; }\n"
         ".section-label { font-weight: 700; font-size: 88%; opacity: 0.6; margin: 10px 6px 2px 6px; }\n"
@@ -1069,8 +1069,18 @@ static void on_scroll_edge(GtkScrolledWindow *sw, GtkPositionType pos, gpointer 
 /* GIF pages come from the provider, so the edge asks Rust for the next page.
  * Rust stops asking once the provider is exhausted. */
 static void on_gif_scroll_edge(GtkScrolledWindow *sw, GtkPositionType pos, gpointer user_data) {
-    (void)sw; (void)user_data;
+    (void)user_data;
     if (pos != GTK_POS_BOTTOM) return;
+    GtkAdjustment *v = gtk_scrolled_window_get_vadjustment(sw);
+    if (v) {
+        double value = gtk_adjustment_get_value(v);
+        double page = gtk_adjustment_get_page_size(v);
+        double upper = gtk_adjustment_get_upper(v);
+        /* A short page that fits the viewport is already "at the bottom"; do not
+         * prefetch every page the moment the tab opens. */
+        if (upper <= page + 1.0) return;
+        if (value + page < upper - 1.0) return;
+    }
     if (g_gif_more_hook) g_gif_more_hook();
 }
 
@@ -1911,26 +1921,158 @@ static GtkWidget *make_thumb(const char *path, int size) {
 }
 
 /* ---- animated GIF cells ------------------------------------------------ */
+/* GdkPixbuf's GIF iterator decodes on every advance, which costs several ms per
+ * frame and starves the main loop once a page holds 24 of them. Each file is
+ * decoded once on a worker thread into frames pre-scaled to cell size; playback
+ * then only picks the frame whose time has come, so the main thread never
+ * decodes anything. */
 
-/* Frames advance on the GDK frame clock, not on per-cell timeouts: one tick
- * walks the visible cells, each GdkPixbufAnimationIter decides from its own
- * delay whether a new frame is due, and a cell is only repainted when the
- * decoded pixbuf actually changed. That plays each GIF at its real speed
- * (including sub-40 ms delays) and stops dead when the window is hidden,
- * because GTK stops the frame clock. */
+#define GIF_MAX_FRAMES 120
 
 typedef struct {
-    GdkPixbufAnimation *anim;
-    GdkPixbufAnimationIter *iter;
-    GtkWidget *img;
+    GdkPixbuf **frames;
+    guint *delays;
+    int n;
+    int total_ms;
+} GifClip;
+
+typedef struct {
+    char *path;
     int size;
-    GdkPixbuf *last_frame;   /* owned by the iterator */
+    GtkWidget *img;
+    GifClip *clip;
+    GdkPixbuf *current;
+    double pos_ms;
+    gint64 last_us;
     guint changes;
     gint64 first_change_us;
-} GifAnim;
+    guint reported_changes;
+} GifCell;
 
+static gboolean gif_anim_should_run(void);
+
+static GHashTable *g_gif_clips = NULL;
+static GHashTable *g_gif_pending = NULL;
 static int g_gif_frame_changes = 0;
 static gboolean g_selftest_force_anim = FALSE;
+
+typedef struct {
+    char *path;
+    GifClip *clip;
+    int size;
+} ClipReady;
+
+static void gif_clip_free(gpointer data) {
+    GifClip *c = data;
+    if (!c) return;
+    for (int i = 0; i < c->n; i++)
+        if (c->frames[i]) g_object_unref(c->frames[i]);
+    g_free(c->frames);
+    g_free(c->delays);
+    g_free(c);
+}
+
+static GifClip *gif_clip_decode(const char *path, int size) {
+    GError *err = NULL;
+    GdkPixbufAnimation *anim = gdk_pixbuf_animation_new_from_file(path, &err);
+    if (!anim) {
+        if (err) g_error_free(err);
+        return NULL;
+    }
+
+    GifClip *clip = g_new0(GifClip, 1);
+    clip->frames = g_new0(GdkPixbuf *, GIF_MAX_FRAMES);
+    clip->delays = g_new0(guint, GIF_MAX_FRAMES);
+
+    GTimeVal base;
+    g_get_current_time(&base);
+    GdkPixbufAnimationIter *iter = gdk_pixbuf_animation_get_iter(anim, &base);
+    while (clip->n < GIF_MAX_FRAMES) {
+        GdkPixbuf *frame = gdk_pixbuf_animation_iter_get_pixbuf(iter);
+        int delay = gdk_pixbuf_animation_iter_get_delay_time(iter);
+        if (!frame) break;
+        if (delay <= 0) delay = 100;
+        if (delay > 1000) delay = 1000;
+
+        GdkPixbuf *fit = fit_pixbuf(frame, size);
+        if (fit) {
+            clip->frames[clip->n] = fit;
+            clip->delays[clip->n] = (guint)delay;
+            clip->total_ms += delay;
+            clip->n++;
+        }
+        base.tv_usec += delay * 1000;
+        base.tv_sec += base.tv_usec / 1000000;
+        base.tv_usec %= 1000000;
+        gdk_pixbuf_animation_iter_advance(iter, &base);
+        if (gdk_pixbuf_animation_is_static_image(anim)) break;
+    }
+    g_object_unref(anim);
+
+    if (clip->n == 0) {
+        gif_clip_free(clip);
+        return NULL;
+    }
+    return clip;
+}
+
+static void deliver_clip(gpointer data);
+
+static gpointer gif_clip_thread(gpointer data) {
+    ClipReady *job = data;
+    GifClip *clip = gif_clip_decode(job->path, job->size);
+    ClipReady *ready = g_new0(ClipReady, 1);
+    ready->path = g_strdup(job->path);
+    ready->clip = clip;
+    g_free(job->path);
+    g_free(job);
+    super_v_ui_post_to_main(deliver_clip, ready);
+    return NULL;
+}
+
+static void clip_set_current(GifCell *cell, GdkPixbuf *frame) {
+    if (!frame || cell->current == frame) return;
+    if (cell->current) g_object_unref(cell->current);
+    cell->current = (GdkPixbuf *)g_object_ref(frame);
+    gtk_widget_queue_draw(cell->img);
+}
+
+static void deliver_clip(gpointer data) {
+    ClipReady *ready = data;
+    if (!g_gif_clips) g_gif_clips = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
+        gif_clip_free);
+    if (!g_gif_pending) g_gif_pending = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    if (ready->clip) {
+        GifClip *old = g_hash_table_lookup(g_gif_clips, ready->path);
+        if (old) {
+            gif_clip_free(old);
+            g_hash_table_remove(g_gif_clips, ready->path);
+        }
+        g_hash_table_insert(g_gif_clips, g_strdup(ready->path), ready->clip);
+    }
+    g_hash_table_remove(g_gif_pending, ready->path);
+    if (g_gif_flow && gif_anim_should_run()) gtk_widget_queue_draw(g_gif_flow);
+    g_free(ready->path);
+    g_free(ready);
+}
+
+static GifClip *gif_clip_get(const char *path, int size) {
+    if (!g_gif_clips) {
+        g_gif_clips = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, gif_clip_free);
+        g_gif_pending = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    }
+    GifClip *clip = g_hash_table_lookup(g_gif_clips, path);
+    if (clip) return clip;
+    if (g_hash_table_contains(g_gif_pending, path)) return NULL;
+
+    g_hash_table_insert(g_gif_pending, g_strdup(path), GINT_TO_POINTER(1));
+    ClipReady *job = g_new0(ClipReady, 1);
+    job->path = g_strdup(path);
+    job->size = size;
+    GThread *thread = g_thread_new("gif-decode", gif_clip_thread, job);
+    g_thread_unref(thread);
+    return NULL;
+}
 
 static gboolean gif_anim_should_run(void) {
     if (g_selftest_force_anim) return TRUE;
@@ -1938,13 +2080,6 @@ static gboolean gif_anim_should_run(void) {
     if (!g_stack) return FALSE;
     const char *name = adw_view_stack_get_visible_child_name(ADW_VIEW_STACK(g_stack));
     return name && strcmp(name, "gif") == 0;
-}
-
-static void gif_anim_free(gpointer data) {
-    GifAnim *a = data;
-    if (a->iter) g_object_unref(a->iter);
-    if (a->anim) g_object_unref(a->anim);
-    g_free(a);
 }
 
 static gboolean gif_thumb_on_screen(GtkWidget *img) {
@@ -1959,60 +2094,140 @@ static gboolean gif_thumb_on_screen(GtkWidget *img) {
         && bounds.origin.x < w && bounds.origin.x + bounds.size.width > 0;
 }
 
-static void gif_cell_advance(GifAnim *a) {
-    if (!a->iter) return;
-    gdk_pixbuf_animation_iter_advance(a->iter, NULL);
-    GdkPixbuf *frame = gdk_pixbuf_animation_iter_get_pixbuf(a->iter);
-    if (!frame || frame == a->last_frame) return;
-    a->last_frame = frame;
-    image_set_fitted(a->img, frame, a->size);
-    if (!a->first_change_us) a->first_change_us = g_get_monotonic_time();
-    a->changes++;
-    g_gif_frame_changes++;
+static void gif_cell_draw(GtkDrawingArea *area, cairo_t *cr, int width, int height,
+    gpointer data) {
+    (void)area;
+    GifCell *cell = (GifCell *)data;
+    if (!cell || !cell->current) return;
+    int iw = gdk_pixbuf_get_width(cell->current);
+    int ih = gdk_pixbuf_get_height(cell->current);
+    if (iw <= 0 || ih <= 0) return;
+    double scale = MIN((double)width / iw, (double)height / ih);
+    cairo_save(cr);
+    cairo_translate(cr, (width - iw * scale) / 2.0, (height - ih * scale) / 2.0);
+    cairo_scale(cr, scale, scale);
+    gdk_cairo_set_source_pixbuf(cr, cell->current, 0, 0);
+    cairo_paint(cr);
+    cairo_restore(cr);
+}
+
+static void gif_cell_free(gpointer data) {
+    GifCell *cell = data;
+    if (cell->current) g_object_unref(cell->current);
+    g_free(cell->path);
+    g_free(cell);
+}
+
+/* Advance one cell by the elapsed wall time. No decoding happens here. */
+static void gif_cell_step(GifCell *cell, gint64 now) {
+    if (!cell->clip) {
+        cell->clip = gif_clip_get(cell->path, cell->size);
+        if (!cell->clip) return;
+        if (cell->clip->n == 1) cell->clip->total_ms = 0;
+    }
+    GifClip *clip = cell->clip;
+    if (clip->total_ms <= 0) {
+        clip_set_current(cell, clip->frames[0]);
+        return;
+    }
+    if (!cell->last_us) cell->last_us = now;
+    double dt = (double)(now - cell->last_us) / 1000.0;
+    cell->last_us = now;
+    if (dt < 0 || dt > 250) dt = 0;   /* resume after a pause */
+    cell->pos_ms += dt;
+    double total = (double)clip->total_ms;
+    while (cell->pos_ms >= total) cell->pos_ms -= total;
+
+    int index = 0;
+    double acc = 0;
+    for (int i = 0; i < clip->n; i++) {
+        acc += (double)clip->delays[i];
+        if (cell->pos_ms < acc) {
+            index = i;
+            break;
+        }
+    }
+    GdkPixbuf *frame = clip->frames[index];
+    if (frame != cell->current) {
+        clip_set_current(cell, frame);
+        if (!cell->first_change_us) cell->first_change_us = now;
+        cell->changes++;
+        g_gif_frame_changes++;
+    }
 }
 
 static gboolean gif_frame_tick(GtkWidget *widget, GdkFrameClock *clock, gpointer data) {
     (void)widget; (void)clock; (void)data;
     if (!g_gif_flow || !gif_anim_should_run()) return G_SOURCE_CONTINUE;
+    static gboolean fps_log = FALSE;
+    static gint64 fps_start = 0;
+    static int fps_ticks = 0, fps_changes = 0, fps_cells = 0, fps_cells_max = 0;
+    if (!fps_start && g_getenv("SUPER_V_FPS_LOG")) {
+        fps_log = TRUE;
+        fps_start = g_get_monotonic_time();
+    }
+    if (fps_log) fps_ticks++;
+    gint64 now = g_get_monotonic_time();
     for (GtkWidget *child = gtk_widget_get_first_child(g_gif_flow); child;
          child = gtk_widget_get_next_sibling(child)) {
         GtkWidget *btn = gtk_flow_box_child_get_child(GTK_FLOW_BOX_CHILD(child));
         GtkWidget *img = btn ? gtk_button_get_child(GTK_BUTTON(btn)) : NULL;
         if (!img) continue;
-        GifAnim *a = g_object_get_data(G_OBJECT(img), "gif-anim");
-        if (!a) continue;
-        if (!g_selftest_force_anim && !gif_thumb_on_screen(img)) continue;
-        gif_cell_advance(a);
+        GifCell *cell = g_object_get_data(G_OBJECT(img), "gif-cell");
+        if (!cell) continue;
+        if (!g_selftest_force_anim && !gif_thumb_on_screen(img)) {
+            cell->last_us = 0;
+            continue;
+        }
+        if (fps_log && (++fps_cells > fps_cells_max)) fps_cells_max = fps_cells;
+        guint before = cell->changes;
+        gif_cell_step(cell, now);
+        if (cell->changes != before) fps_changes++;
+    }
+    if (fps_log) {
+        if (now - fps_start >= 1000000) {
+            g_printerr("gif_fps cells=%d ticks=%d changes=%d/s elapsed_ms=%d\n",
+                fps_cells_max, fps_ticks, fps_changes,
+                (int)((now - fps_start) / 1000));
+            fps_start = now;
+            fps_ticks = fps_changes = fps_cells = fps_cells_max = 0;
+        }
+        fps_cells = 0;
     }
     return G_SOURCE_CONTINUE;
 }
 
 static GtkWidget *make_gif_thumb(const char *path, int size) {
+    GdkPixbuf *still = NULL;
     GError *err = NULL;
     GdkPixbufAnimation *anim = gdk_pixbuf_animation_new_from_file(path, &err);
-    if (!anim) {
-        if (err) g_error_free(err);
-        return NULL;
-    }
-
-    GtkWidget *img = gtk_image_new();
-    if (gdk_pixbuf_animation_is_static_image(anim)) {
-        image_set_fitted(img, gdk_pixbuf_animation_get_static_image(anim), size);
+    if (anim) {
+        still = gdk_pixbuf_animation_get_static_image(anim);
+        if (still) g_object_ref(still);
         g_object_unref(anim);
-    } else {
-        GifAnim *a = g_new0(GifAnim, 1);
-        a->anim = anim;
-        a->iter = gdk_pixbuf_animation_get_iter(anim, NULL);
-        a->img = img;
-        a->size = size;
-        a->last_frame = gdk_pixbuf_animation_iter_get_pixbuf(a->iter);
-        image_set_fitted(img, a->last_frame, size);
-        g_object_set_data_full(G_OBJECT(img), "gif-anim", a, gif_anim_free);
+    } else if (err) {
+        g_error_free(err);
     }
+    if (!still) still = gdk_pixbuf_new_from_file(path, NULL);
 
+    GtkWidget *img = gtk_drawing_area_new();
     gtk_widget_set_size_request(img, size, size);
     gtk_widget_set_halign(img, GTK_ALIGN_CENTER);
     gtk_widget_set_valign(img, GTK_ALIGN_CENTER);
+
+    GifCell *cell = g_new0(GifCell, 1);
+    cell->path = g_strdup(path);
+    cell->size = size;
+    cell->img = img;
+    if (still) {
+        cell->current = still;
+    } else {
+        gtk_widget_set_size_request(img, size, size);
+    }
+    gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(img), gif_cell_draw, cell, NULL);
+    g_object_set_data_full(G_OBJECT(img), "gif-cell", cell, gif_cell_free);
+    /* Kick the decode now so the first playback tick already has frames. */
+    cell->clip = gif_clip_get(path, size);
     return img;
 }
 
@@ -2136,15 +2351,6 @@ static gboolean gif_probe_begin(gpointer data) {
 }
 
 /* Async paging check: waits for each page to land before asking for the next. */
-static gboolean gif_click_check(gpointer data) {
-    (void)data;
-    printf("VERIFY: gif_click_texture=%d gif_click_gif=%d\n",
-        g_last_paste_had_texture, g_last_paste_had_gif);
-    fflush(stdout);
-    g_application_quit(G_APPLICATION(g_application_get_default()));
-    return G_SOURCE_REMOVE;
-}
-
 static gboolean gif_probe_round_cb(gpointer data) {
     (void)data;
     int items = 0;
@@ -2163,7 +2369,7 @@ static gboolean gif_probe_round_cb(gpointer data) {
     GtkWidget *first = gtk_widget_get_first_child(g_gif_flow);
     GtkWidget *first_btn = first ? gtk_flow_box_child_get_child(GTK_FLOW_BOX_CHILD(first)) : NULL;
     GtkWidget *first_img = first_btn ? gtk_button_get_child(GTK_BUTTON(first_btn)) : NULL;
-    GifAnim *first_anim = first_img ? g_object_get_data(G_OBJECT(first_img), "gif-anim") : NULL;
+    GifCell *first_anim = first_img ? g_object_get_data(G_OBJECT(first_img), "gif-cell") : NULL;
     if (first_anim && first_anim->changes && first_anim->first_change_us) {
         gint64 span = g_get_monotonic_time() - first_anim->first_change_us;
         if (span > 0) fps = (double)first_anim->changes * 1e6 / (double)span;
@@ -2182,7 +2388,10 @@ static gboolean gif_probe_round_cb(gpointer data) {
         GtkWidget *child = gtk_widget_get_first_child(g_gif_flow);
         GtkWidget *btn = child ? gtk_flow_box_child_get_child(GTK_FLOW_BOX_CHILD(child)) : NULL;
         if (btn) g_signal_emit_by_name(btn, "clicked");
-        g_timeout_add(80, gif_click_check, NULL);
+        printf("VERIFY: gif_click_texture=%d gif_click_gif=%d\n",
+            g_last_paste_had_texture, g_last_paste_had_gif);
+        fflush(stdout);
+        g_application_quit(G_APPLICATION(g_application_get_default()));
         return G_SOURCE_REMOVE;
     }
     g_application_quit(G_APPLICATION(g_application_get_default()));
@@ -2589,7 +2798,6 @@ static GtkWidget *create_main_window(AdwApplication *app) {
     adw_view_stack_add_titled_with_icon(ADW_VIEW_STACK(g_stack), sym_scroll, "symbols", "Symbols", "accessories-character-map-symbolic");
 
     g_signal_connect(g_stack, "notify::visible-child-name", G_CALLBACK(on_tab_switched), NULL);
-    gtk_widget_add_tick_callback(g_main_window, gif_frame_tick, NULL, NULL);
 
     return window;
 }
@@ -2606,6 +2814,8 @@ static void on_app_activate(GtkApplication *app, gpointer user_data) {
 
     install_css();
     g_main_window = create_main_window(ADW_APPLICATION(app));
+    if (g_main_window)
+        gtk_widget_add_tick_callback(g_main_window, gif_frame_tick, NULL, NULL);
     gtk_window_present(GTK_WINDOW(g_main_window));
     g_timeout_add(60, place_after_map, NULL);
     gtk_widget_grab_focus(g_search_entry);
@@ -2613,6 +2823,16 @@ static void on_app_activate(GtkApplication *app, gpointer user_data) {
     g_timeout_add(200, sync_clipboard_idle, NULL);
 
     if (g_activate_hook) g_activate_hook();
+    if (g_getenv("SUPER_V_FPS_LOG") && g_main_window) {
+        gtk_widget_set_visible(g_main_window, TRUE);
+        gtk_window_present(GTK_WINDOW(g_main_window));
+        if (g_stack)
+            adw_view_stack_set_visible_child_name(ADW_VIEW_STACK(g_stack), "gif");
+    }
+    const char *start_tab = g_getenv("SUPER_V_START_TAB");
+    if (start_tab && g_stack)
+        adw_view_stack_set_visible_child_name(ADW_VIEW_STACK(g_stack), start_tab);
+
     if (g_getenv("SUPER_V_SNAPSHOT")) {
         g_timeout_add(1200, take_snapshot, g_strdup(g_getenv("SUPER_V_SNAPSHOT")));
     }

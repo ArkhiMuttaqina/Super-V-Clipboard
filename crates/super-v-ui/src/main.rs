@@ -346,11 +346,12 @@ fn fetch_giphy(
         .flatten()
     {
         let gif_url = item
-            /* fixed_height keeps every frame; the downsampled variant drops
-             * frames, which made playback look choppy. */
-            .pointer("/images/fixed_height/url")
+            /* fixed_width keeps every frame at ~200 px wide; the downsampled
+             * variants drop frames, and the larger originals cost far more to
+             * decode per frame than an 84 px cell can use. */
+            .pointer("/images/fixed_width/url")
+            .or_else(|| item.pointer("/images/fixed_height/url"))
             .or_else(|| item.pointer("/images/original/url"))
-            .or_else(|| item.pointer("/images/fixed_height_downsampled/url"))
             .and_then(|u| u.as_str());
         let title = item
             .get("title")

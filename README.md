@@ -98,11 +98,13 @@ Measured deterministically with `autoresearch.sh`:
 - **GIF tab:** local library plus Tenor or Giphy (whichever is selected), typed
   queries go to the provider, scrolling pulls the next page, and cells play while
   the tab is on screen.
-  - Playback runs off the GDK frame clock, not per-cell timers: each cell advances
-    from its own frame delay and is only repainted when the decoded frame changed,
-    so a 30-frame GIF plays at its real rate and hidden windows cost nothing.
-  - Media is Giphy's `fixed_height`, which keeps every frame. The downsampled
-    variant drops frames (3-6 per GIF) and looked choppy, so it is only a fallback.
+  - Playback is pre-decoded: a worker thread decodes each GIF once into frames
+    already scaled to the 84 px cell (capped at 120 frames), and the frame clock
+    tick only picks the frame whose time has come. The main thread never decodes,
+    so 20 visible GIFs hold 60 ticks/s while each one advances at its own delay.
+  - Media is Giphy's `fixed_width` (~200 px wide), then `fixed_height`, then the
+    original. The downsampled variants drop frames (3-6 per GIF) and looked
+    choppy, so they are only a fallback.
   - Picking a GIF copies the animated file itself: the clipboard carries
     `image/gif` unioned with a first-frame texture. WhatsApp/Telegram web receive
     the moving GIF, texture-only clients still get the first frame. The file is
