@@ -96,9 +96,31 @@ export default class SuperVBridgeExtension extends Extension {
         this._timeout = 0;
         this._virtualKeyboard = null;
         this._prevFocus = null;
+        this._source = null;
+        this._lastText = '';
+        this._pollId = GLib.timeout_add(
+            GLib.PRIORITY_DEFAULT, 800, () => {
+                this._pollSelection();
+                return GLib.SOURCE_CONTINUE;
+            });
+    }
+
+    _pollSelection() {
+        if (!this._source)
+            return;
+        try {
+            this._readSelection(this._source);
+        } catch {
+            // The source died; the next owner-changed replaces it.
+        }
     }
 
     disable() {
+        if (this._pollId) {
+            GLib.source_remove(this._pollId);
+            this._pollId = 0;
+        }
+        this._source = null;
         if (this._timeout) {
             GLib.source_remove(this._timeout);
             this._timeout = 0;
@@ -259,6 +281,7 @@ export default class SuperVBridgeExtension extends Extension {
     _onOwnerChanged(_selection, selectionType, source) {
         if (selectionType !== Meta.SelectionType.SELECTION_CLIPBOARD)
             return;
+        this._source = source;
         if (this._timeout)
             GLib.source_remove(this._timeout);
         this._timeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 120, () => {
@@ -299,6 +322,9 @@ export default class SuperVBridgeExtension extends Extension {
                 } catch {
                     return;
                 }
+                if (text === this._lastText)
+                    return;
+                this._lastText = text;
                 this._handOff(text);
             });
     }

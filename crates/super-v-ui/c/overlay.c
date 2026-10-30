@@ -149,9 +149,24 @@ static void emit_paste(long long id, const char *text) {
     if (g_paste_cb) g_paste_cb(id, text);
 }
 
+static void on_history_row_activated(AdwActionRow *row, gpointer data) {
+    (void)data;
+    const char *text = (const char *)g_object_get_data(G_OBJECT(row), "super_v_text");
+    if (text && *text) {
+        paste_after_hide(text);
+        return;
+    }
+    gint64 *pid = (gint64 *)g_object_get_data(G_OBJECT(row), "super_v_id");
+    if (pid) {
+        emit_paste((long long)*pid, NULL);
+        hide_main_window();
+    }
+}
+
 static void on_row_activated(GtkListBox *box, GtkListBoxRow *row, gpointer user_data) {
     (void)box; (void)user_data;
     const char *text = (const char *)g_object_get_data(G_OBJECT(row), "super_v_text");
+    if (g_getenv("SUPER_V_DEBUG_INSERT")) g_printerr("ROW activated text=%s pid=%s\n", (text && *text) ? "yes" : "no", g_object_get_data(G_OBJECT(row), "super_v_id") ? "yes" : "no");
     gint64 *pid = (gint64 *)g_object_get_data(G_OBJECT(row), "super_v_id");
     if (text && *text) {
         paste_after_hide(text);
@@ -243,6 +258,7 @@ void super_v_ui_add_history_item(const char *title, const char *subtitle, int is
     }
 
     g_object_set_data_full(G_OBJECT(row), "super_v_text", g_strdup(title ? title : ""), g_free);
+    g_signal_connect(row, "activated", G_CALLBACK(on_history_row_activated), NULL);
     gint64 *heap_id = g_new0(gint64, 1);
     *heap_id = (gint64)id;
     g_object_set_data_full(G_OBJECT(row), "super_v_id", heap_id, g_free);
@@ -373,7 +389,7 @@ static void on_clipboard_captured_for_paste(GObject *source, GAsyncResult *res, 
     }
 
     hide_main_window();
-    g_timeout_add(150, do_paste_action, action);
+    g_timeout_add(90, do_paste_action, action);
 }
 
 void super_v_ui_paste_text(const char *text) {
@@ -1375,6 +1391,17 @@ static gboolean run_selftest(gpointer data) {
     if (g_getenv("SUPER_V_SELFTEST_APIKEY") && g_api_key_hook) {
         g_api_key_hook("smoke-key-1234");
         printf("VERIFY: api_key_hook_called=true\n");
+    }
+    if (g_getenv("SUPER_V_SELFTEST_ROW")) {
+        GtkListBoxRow *first = gtk_list_box_get_row_at_index(GTK_LIST_BOX(g_clip_list), 0);
+        if (first) {
+            g_signal_emit_by_name(g_clip_list, "row-activated", first);
+            printf("VERIFY: row_activated=true\n");
+            fflush(stdout);
+        } else {
+            printf("VERIFY: row_activated=false\n");
+            fflush(stdout);
+        }
     }
     if (g_getenv("SUPER_V_SELFTEST_PASTE")) {
         super_v_ui_paste_text("PASTE-TEST-VALUE");
