@@ -49,6 +49,24 @@ impl GlyphIndex {
         self.symbols.len()
     }
 
+    /// Borrow a page of a tab's glyphs without cloning (zero-alloc paging).
+    pub fn page(&self, tab: &str, offset: usize, limit: usize) -> Vec<&RawGlyph> {
+        let src = match tab {
+            "emoji" => &self.emojis,
+            "kaomoji" => &self.kaomojis,
+            _ => &self.symbols,
+        };
+        src.iter().skip(offset).take(limit).collect()
+    }
+
+    pub fn total_for(&self, tab: &str) -> usize {
+        match tab {
+            "emoji" => self.emojis.len(),
+            "kaomoji" => self.kaomojis.len(),
+            _ => self.symbols.len(),
+        }
+    }
+
     pub fn search(&self, query: &str, limit: usize) -> Vec<RawGlyph> {
         let q = query.to_lowercase();
         let mut results = Vec::new();

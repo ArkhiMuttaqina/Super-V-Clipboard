@@ -6,6 +6,7 @@ members = [
     "crates/super-v-core",
     "crates/super-v-daemon",
     "crates/super-v-ui",
+    "crates/super-v-toggle",
 ]
 
 [workspace.package]

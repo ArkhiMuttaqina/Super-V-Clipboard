@@ -1,10 +1,12 @@
 [Desktop Entry]
 Name=Super-V Clipboard
 Comment=Windows-style clipboard overlay for GNOME, Hyprland, and X11
-Exec=super-v-ui
+Exec=super-v-toggle
+TryExec=super-v-toggle
 Icon=edit-paste
 Terminal=false
 Type=Application
-Categories=Utility;GNOME;GTK;
-StartupNotify=true
-X-GNOME-UsesNotifications=true
+Categories=Utility;
+StartupNotify=false
+StartupWMClass=my.id.arkhimuttaqina.SuperVClipboard
+NoDisplay=false

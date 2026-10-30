@@ -29,11 +29,11 @@
           "sessionId": "01a189bc-cacd-72da-bef2-d097c7671de7"
         },
         "startedAt": 1793312703437,
-        "updatedAt": 1793324429762,
-        "expiresAt": 1793324444762
+        "updatedAt": 1793325940811,
+        "expiresAt": 1793325955811
       },
-      "version": 2901,
-      "updatedAt": 1793324429763,
+      "version": 3338,
+      "updatedAt": 1793325940812,
       "updatedBy": {
         "id": "session:01a189bc-cacd-72da-bef2-d097c7671de7",
         "name": "main",
@@ -53,14 +53,15 @@
         "transport": "host",
         "cwd": "/home/arkhims/repo/super-v-clipboard",
         "sessionId": "01a189bc-cacd-72da-bef2-d097c7671de7",
-        "model": "zen-arkhi/antigravity/gemini-3.8-flash-tiered",
+        "model": "zen-arkhi/nut/deepseek-v4.1-flash-1017",
+        "thinking": "high",
         "startedAt": 1793312703436,
-        "updatedAt": 1793324429762,
+        "updatedAt": 1793325940811,
         "pendingMessages": false,
         "local": false
       },
-      "version": 2901,
-      "updatedAt": 1793324429766,
+      "version": 3338,
+      "updatedAt": 1793325940814,
       "updatedBy": {
         "id": "session:01a189bc-cacd-72da-bef2-d097c7671de7",
         "name": "main",
@@ -88,15 +89,16 @@
         ],
         "cwd": "/home/arkhims/repo/super-v-clipboard",
         "sessionId": "01a189bc-cacd-72da-bef2-d097c7671de7",
-        "model": "zen-arkhi/antigravity/gemini-3.8-flash-tiered",
+        "model": "zen-arkhi/nut/deepseek-v4.1-flash-1017",
+        "thinking": "high",
         "startedAt": 1793312703436,
-        "updatedAt": 1793324429762,
+        "updatedAt": 1793325940811,
         "pendingMessages": false,
         "controlProtocol": "v1",
         "label": "SVC-1"
       },
-      "version": 2901,
-      "updatedAt": 1793324429768,
+      "version": 3338,
+      "updatedAt": 1793325940821,
       "updatedBy": {
         "id": "session:01a189bc-cacd-72da-bef2-d097c7671de7",
         "name": "main",
@@ -107,9 +109,9 @@
   },
   "versions": {
     "topology/peer-seq": 1,
-    "topology/hosts/e14380798fd0180bc90e877f95941d5a123f482af771a37d0bc999366b4a6e44": 2901,
-    "sessions/01a189bc-cacd-72da-bef2-d097c7671de7": 2901,
-    "topology/participants/e14380798fd0180bc90e877f95941d5a123f482af771a37d0bc999366b4a6e44": 2901
+    "topology/hosts/e14380798fd0180bc90e877f95941d5a123f482af771a37d0bc999366b4a6e44": 3338,
+    "sessions/01a189bc-cacd-72da-bef2-d097c7671de7": 3338,
+    "topology/participants/e14380798fd0180bc90e877f95941d5a123f482af771a37d0bc999366b4a6e44": 3338
   },
   "tombstoneOrder": []
 }

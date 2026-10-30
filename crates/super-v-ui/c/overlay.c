@@ -3,6 +3,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <glib-unix.h>
+#include <signal.h>
+#include <malloc.h>
 
 static GtkWidget *g_main_window = NULL;
 static GtkWidget *g_clip_list = NULL;
@@ -14,6 +17,15 @@ static GtkWidget *g_kaomoji_box = NULL;
 static GtkWidget *g_gif_flow = NULL;
 
 static void free_closure_data(gpointer data, GClosure *closure) { (void)closure; g_free(data); }
+static GlyphProvider g_glyph_provider = NULL;
+static ActivateHook g_activate_hook = NULL;
+static void hide_main_window(void);
+static GtkWidget *make_thumb(const char *path);
+static int g_offset_emoji = 0;
+static int g_offset_symbol = 0;
+static GtkWidget *g_emoji_scroll = NULL;
+static GtkWidget *g_symbol_scroll = NULL;
+
 static PasteCallback g_paste_cb = NULL;
 static PinCallback g_pin_cb = NULL;
 static DeleteCallback g_delete_cb = NULL;
@@ -21,6 +33,8 @@ static DeleteCallback g_delete_cb = NULL;
 void super_v_ui_set_paste_callback(PasteCallback cb) { g_paste_cb = cb; }
 void super_v_ui_set_pin_callback(PinCallback cb) { g_pin_cb = cb; }
 void super_v_ui_set_delete_callback(DeleteCallback cb) { g_delete_cb = cb; }
+void super_v_ui_set_glyph_provider(GlyphProvider cb) { g_glyph_provider = cb; }
+void super_v_ui_set_activate_hook(ActivateHook cb) { g_activate_hook = cb; }
 
 static void on_settings_clicked(GtkButton *btn, gpointer user_data) {
     (void)btn;
@@ -39,7 +53,7 @@ static void on_row_activated(GtkListBox *box, GtkListBoxRow *row, gpointer user_
     }
 
     if (g_main_window) {
-        gtk_widget_set_visible(g_main_window, FALSE);
+        hide_main_window();
     }
 }
 
@@ -80,7 +94,8 @@ static void on_toggle_mask_clicked(GtkButton *btn, gpointer user_data) {
     g_object_set_data(G_OBJECT(row), "super_v_masked", GINT_TO_POINTER(is_masked));
 
     if (is_masked) {
-        adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row), "•••••••• (Sensitive Content Hidden)");
+        adw_preferences_row_set_use_markup(ADW_PREFERENCES_ROW(row), FALSE);
+        adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row), "******** (Sensitive Content Hidden)");
         gtk_button_set_icon_name(btn, "view-reveal-symbolic");
         gtk_widget_set_tooltip_text(GTK_WIDGET(btn), "Show Sensitive Content");
     } else {
@@ -97,7 +112,7 @@ static void on_glyph_clicked(GtkButton *btn, gpointer user_data) {
         g_paste_cb(0, glyph);
     }
     if (g_main_window) {
-        gtk_widget_set_visible(g_main_window, FALSE);
+        hide_main_window();
     }
 }
 
@@ -108,7 +123,7 @@ static void on_emoji_skintone_variant_clicked(GtkButton *btn, gpointer user_data
         g_paste_cb(0, variant);
     }
     if (g_main_window) {
-        gtk_widget_set_visible(g_main_window, FALSE);
+        hide_main_window();
     }
 }
 
@@ -150,12 +165,12 @@ static gboolean on_window_key_pressed(GtkEventControllerKey *controller,
     GtkWindow *window = GTK_WINDOW(user_data);
 
     if (keyval == GDK_KEY_Escape) {
-        gtk_widget_set_visible(GTK_WIDGET(window), FALSE);
+        hide_main_window();
         return TRUE;
     }
 
     if ((state & GDK_CONTROL_MASK) && (keyval == GDK_KEY_w || keyval == GDK_KEY_q)) {
-        gtk_widget_set_visible(GTK_WIDGET(window), FALSE);
+        hide_main_window();
         return TRUE;
     }
 
@@ -169,14 +184,14 @@ static gboolean on_window_key_pressed(GtkEventControllerKey *controller,
 
 static gboolean on_window_close_request(GtkWindow *window, gpointer user_data) {
     (void)user_data;
-    gtk_widget_set_visible(GTK_WIDGET(window), FALSE);
+    hide_main_window();
     return TRUE;
 }
 
 static void on_close_btn_clicked(GtkButton *btn, gpointer user_data) {
     (void)btn;
     GtkWidget *window = GTK_WIDGET(user_data);
-    gtk_widget_set_visible(window, FALSE);
+    hide_main_window();
 }
 
 static gboolean clip_list_filter_func(GtkListBoxRow *row, gpointer user_data) {
@@ -320,15 +335,15 @@ void super_v_ui_add_history_item(const char *title, const char *subtitle, int is
         g_object_set_data_full(G_OBJECT(row), "super_v_text", g_strdup(title), g_free);
     }
 
+    adw_preferences_row_set_use_markup(ADW_PREFERENCES_ROW(row), FALSE);
     adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row), title ? title : "(Empty)");
     if (subtitle) {
         adw_action_row_set_subtitle(ADW_ACTION_ROW(row), subtitle);
     }
 
     if (preview_image_path && strlen(preview_image_path) > 0) {
-        GtkWidget *img = gtk_picture_new_for_filename(preview_image_path);
-        gtk_widget_set_size_request(img, 48, 48);
-        adw_action_row_add_prefix(ADW_ACTION_ROW(row), img);
+        GtkWidget *img = make_thumb(preview_image_path);
+        if (img) adw_action_row_add_prefix(ADW_ACTION_ROW(row), img);
     } else if (is_pinned) {
         GtkWidget *pin_icon = gtk_image_new_from_icon_name("view-pin-symbolic");
         gtk_widget_set_tooltip_text(pin_icon, "Pinned Item");
@@ -399,6 +414,95 @@ void super_v_ui_record_recent(const char *type, const char *content) {
     gtk_flow_box_insert(GTK_FLOW_BOX(g_recent_emoji_flow), btn, 0);
 }
 
+#define GLYPH_PAGE 120
+
+static int load_more_glyphs(const char *tab) {
+    if (!g_glyph_provider) return 0;
+    int offset = (strcmp(tab, "emoji") == 0) ? g_offset_emoji : g_offset_symbol;
+    int emitted = g_glyph_provider(tab, offset, GLYPH_PAGE);
+    if (emitted <= 0) return 0;
+    if (strcmp(tab, "emoji") == 0) g_offset_emoji += emitted;
+    else g_offset_symbol += emitted;
+    return emitted;
+}
+
+static void on_glyph_scroll_edge(GtkScrolledWindow *sw, gpointer user_data) {
+    (void)sw;
+    load_more_glyphs((const char *)user_data);
+}
+
+static void on_tab_switched(AdwViewStack *stack, GParamSpec *pspec, gpointer user_data) {
+    (void)pspec; (void)user_data;
+    const char *name = adw_view_stack_get_visible_child_name(stack);
+    if (!name) return;
+    if (strcmp(name, "emoji") == 0 && g_offset_emoji == 0) load_more_glyphs("emoji");
+    if (strcmp(name, "symbols") == 0 && g_offset_symbol == 0) load_more_glyphs("symbol");
+}
+#define IDLE_EXIT_SECONDS 180
+
+static guint g_idle_exit_source = 0;
+
+static gboolean idle_exit_cb(gpointer data) {
+    (void)data;
+    g_idle_exit_source = 0;
+    GApplication *app = g_application_get_default();
+    if (app) g_application_quit(app);
+    return G_SOURCE_REMOVE;
+}
+
+static void schedule_idle_exit(void) {
+    if (g_idle_exit_source) g_source_remove(g_idle_exit_source);
+    guint secs = IDLE_EXIT_SECONDS;
+    const char *override = g_getenv("SUPER_V_IDLE_EXIT_SECONDS");
+    if (override) { int v = atoi(override); if (v > 0) secs = (guint)v; }
+    g_idle_exit_source = g_timeout_add_seconds(secs, idle_exit_cb, NULL);
+}
+
+static void cancel_idle_exit(void) {
+    if (g_idle_exit_source) { g_source_remove(g_idle_exit_source); g_idle_exit_source = 0; }
+}
+
+static void hide_main_window(void) {
+    if (!g_main_window) return;
+    hide_main_window();
+    schedule_idle_exit();
+    /* Give freed widget/style memory back to the OS while hidden. */
+    malloc_trim(0);
+}
+
+static gboolean on_hide_signal(gpointer data) {
+    (void)data;
+    hide_main_window();
+    return G_SOURCE_CONTINUE;
+}
+
+/* Delta the resident UI is asked to show itself: SIGUSR1 from super-v-toggle. */
+static gboolean on_toggle_signal(gpointer data) {
+    (void)data;
+    if (!g_main_window) return G_SOURCE_CONTINUE;
+    cancel_idle_exit();
+    gtk_widget_set_visible(g_main_window, TRUE);
+    gtk_window_present(GTK_WINDOW(g_main_window));
+    return G_SOURCE_CONTINUE;
+}
+/* Decode, downscale, and drop the source pixbuf: a full 1920x1080 screenshot
+   is ~8 MB as a pixbuf, while a 48x48 thumbnail is a few KB. */
+static GtkWidget *make_thumb(const char *path) {
+    GError *err = NULL;
+    GdkPixbuf *src = gdk_pixbuf_new_from_file(path, &err);
+    if (!src) {
+        if (err) g_error_free(err);
+        return NULL;
+    }
+    GdkPixbuf *small = gdk_pixbuf_scale_simple(src, 48, 48, GDK_INTERP_BILINEAR);
+    g_object_unref(src);
+    if (!small) return NULL;
+    GtkWidget *img = gtk_image_new_from_pixbuf(small);
+    g_object_unref(small);
+    gtk_widget_set_size_request(img, 48, 48);
+    gtk_image_set_pixel_size(GTK_IMAGE(img), 48);
+    return img;
+}
 static GtkWidget* create_main_window(AdwApplication *app) {
     GtkWidget *window = adw_application_window_new(GTK_APPLICATION(app));
     gtk_window_set_title(GTK_WINDOW(window), "Clipboard (Windows+V)");
@@ -466,7 +570,7 @@ static GtkWidget* create_main_window(AdwApplication *app) {
     adw_view_stack_add_titled_with_icon(stack, clip_scroll, "clipboard", "Clipboard", "edit-paste-symbolic");
 
     // TAB 2: Emoji
-    GtkWidget *emoji_scroll = gtk_scrolled_window_new();
+    g_emoji_scroll = gtk_scrolled_window_new();
     GtkWidget *emoji_container = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
     gtk_widget_set_margin_start(emoji_container, 10);
     gtk_widget_set_margin_end(emoji_container, 10);
@@ -497,8 +601,9 @@ static GtkWidget* create_main_window(AdwApplication *app) {
     gtk_flow_box_set_max_children_per_line(GTK_FLOW_BOX(g_emoji_flow), 8);
     gtk_box_append(GTK_BOX(emoji_container), g_emoji_flow);
 
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(emoji_scroll), emoji_container);
-    adw_view_stack_add_titled_with_icon(stack, emoji_scroll, "emoji", "Emoji", "face-smile-symbolic");
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(g_emoji_scroll), emoji_container);
+    g_signal_connect(g_emoji_scroll, "edge-reached", G_CALLBACK(on_glyph_scroll_edge), (gpointer)"emoji");
+    adw_view_stack_add_titled_with_icon(stack, g_emoji_scroll, "emoji", "Emoji", "face-smile-symbolic");
 
     // TAB 3: GIF Search & Provider
     GtkWidget *gif_scroll = gtk_scrolled_window_new();
@@ -542,7 +647,7 @@ static GtkWidget* create_main_window(AdwApplication *app) {
     adw_view_stack_add_titled_with_icon(stack, kaomoji_scroll, "kaomoji", "Kaomoji", "emblem-favorite-symbolic");
 
     // TAB 5: Symbols
-    GtkWidget *sym_scroll = gtk_scrolled_window_new();
+    g_symbol_scroll = gtk_scrolled_window_new();
     GtkWidget *sym_container = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
     gtk_widget_set_margin_start(sym_container, 10);
     gtk_widget_set_margin_end(sym_container, 10);
@@ -558,8 +663,11 @@ static GtkWidget* create_main_window(AdwApplication *app) {
     gtk_flow_box_set_max_children_per_line(GTK_FLOW_BOX(g_symbol_flow), 8);
     gtk_box_append(GTK_BOX(sym_container), g_symbol_flow);
 
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(sym_scroll), sym_container);
-    adw_view_stack_add_titled_with_icon(stack, sym_scroll, "symbols", "Symbols", "accessories-calculator-symbolic");
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(g_symbol_scroll), sym_container);
+    g_signal_connect(g_symbol_scroll, "edge-reached", G_CALLBACK(on_glyph_scroll_edge), (gpointer)"symbol");
+    adw_view_stack_add_titled_with_icon(stack, g_symbol_scroll, "symbols", "Symbols", "accessories-calculator-symbolic");
+
+    g_signal_connect(stack, "notify::visible-child-name", G_CALLBACK(on_tab_switched), NULL);
 
     return window;
 }
@@ -569,11 +677,15 @@ static void on_app_activate(GApplication *app, gpointer user_data) {
     if (!g_main_window) {
         g_main_window = create_main_window(ADW_APPLICATION(app));
     }
+    cancel_idle_exit();
+    if (g_activate_hook) g_activate_hook();
     gtk_widget_set_visible(g_main_window, TRUE);
     gtk_window_present(GTK_WINDOW(g_main_window));
 }
 
 int super_v_ui_run_app(int argc, char **argv) {
+    g_unix_signal_add(SIGUSR1, on_toggle_signal, NULL);
+    g_unix_signal_add(SIGUSR2, on_hide_signal, NULL);
     AdwApplication *app = adw_application_new("my.id.arkhimuttaqina.SuperVClipboard", G_APPLICATION_DEFAULT_FLAGS);
     g_signal_connect(app, "activate", G_CALLBACK(on_app_activate), NULL);
     int status = g_application_run(G_APPLICATION(app), argc, argv);

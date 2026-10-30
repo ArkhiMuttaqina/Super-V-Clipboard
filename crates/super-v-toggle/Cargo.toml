@@ -1,0 +1,8 @@
+[package]
+name = "super-v-toggle"
+version = "0.1.0"
+edition = "2021"
+description = "Instant Super+V launcher: signals the resident overlay, never initialises GTK itself."
+
+[dependencies]
+libc = { workspace = true }
