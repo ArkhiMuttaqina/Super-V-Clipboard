@@ -145,7 +145,7 @@ static void on_row_activated(GtkListBox *box, GtkListBoxRow *row, gpointer user_
     const char *text = (const char *)g_object_get_data(G_OBJECT(row), "super_v_text");
     gint64 *pid = (gint64 *)g_object_get_data(G_OBJECT(row), "super_v_id");
     if (text && *text) {
-        super_v_ui_insert_text(text);
+        super_v_ui_paste_text(text);
     } else if (pid) {
         emit_paste((long long)*pid, NULL);
     } else {
@@ -325,19 +325,119 @@ void super_v_ui_insert_text(const char *text) {
     g_object_unref(bus);
 }
 
+/* Paste a picked value into the focused app. The clipboard must carry the
+   text for an instant because that is the only interface every toolkit and
+   terminal honours; the previous clipboard is restored 400 ms later, so a
+   pick never permanently changes what you copied. */
+static guint g_restore_source = 0;
+static char *g_saved_clip = NULL;
+
+static gboolean restore_clipboard(gpointer data) {
+    (void)data;
+    g_restore_source = 0;
+    GdkDisplay *d = gdk_display_get_default();
+    if (d && g_saved_clip) {
+        g_skip_change = TRUE;
+        gdk_clipboard_set_text(gdk_display_get_clipboard(d), g_saved_clip);
+    }
+    g_free(g_saved_clip);
+    g_saved_clip = NULL;
+    return G_SOURCE_REMOVE;
+}
+
+static void simulate_paste(void) {
+    GError *err = NULL;
+    GDBusConnection *bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, &err);
+    if (!bus) {
+        if (err) g_error_free(err);
+        return;
+    }
+    g_dbus_connection_call(bus,
+        "my.id.arkhimuttaqina.Bridge",
+        "/my/id/arkhimuttaqina/Bridge",
+        "my.id.arkhimuttaqina.Bridge",
+        "SimulatePaste",
+        g_variant_new("(s)", "auto"),
+        NULL, G_DBUS_CALL_FLAGS_NONE, 600, NULL, NULL, NULL);
+    g_object_unref(bus);
+}
+
+static void on_saved_clip_for_paste(GObject *source, GAsyncResult *res, gpointer data) {
+    GError *rerr = NULL;
+    char *previous = gdk_clipboard_read_text_finish(GDK_CLIPBOARD(source), res, &rerr);
+    if (g_getenv("SUPER_V_DEBUG_INSERT")) g_printerr("PASTE cb previous=%s err=%s\n", previous ? previous : "(null)", rerr ? rerr->message : "none");
+    if (rerr) g_error_free(rerr);
+    const char *text = (const char *)data;
+
+    g_skip_change = TRUE;
+    gdk_clipboard_set_text(GDK_CLIPBOARD(source), text);
+    simulate_paste();
+
+    g_free(g_saved_clip);
+    g_saved_clip = previous;
+    if (g_saved_clip && !g_restore_source) {
+        g_restore_source = g_timeout_add(400, restore_clipboard, NULL);
+    }
+    g_free((char *)data);
+}
+
+static void paste_via_clipboard(const char *text) {
+    if (!text || !*text) return;
+    GdkDisplay *d = gdk_display_get_default();
+    if (!d) return;
+    GdkClipboard *clip = gdk_display_get_clipboard(d);
+    if (!clip) return;
+    gdk_clipboard_read_text_async(clip, NULL, on_saved_clip_for_paste, g_strdup(text));
+}
+
+static void on_typed_insert_done(GObject *source, GAsyncResult *res, gpointer data) {
+    char *text = (char *)data;
+    GError *err = NULL;
+    GVariant *reply = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source), res, &err);
+    if (reply) {
+        g_variant_unref(reply);
+        if (g_getenv("SUPER_V_DEBUG_INSERT")) g_printerr("INSERT typed\n");
+        g_free(text);
+        return;
+    }
+    if (g_getenv("SUPER_V_DEBUG_INSERT")) g_printerr("INSERT fallback: %s\n", err ? err->message : "?");
+    if (err) g_error_free(err);
+    paste_via_clipboard(text);
+    g_free(text);
+}
+
+void super_v_ui_paste_text(const char *text) {
+    if (!text || !*text) return;
+    GError *err = NULL;
+    GDBusConnection *bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, &err);
+    if (!bus) {
+        if (err) g_error_free(err);
+        paste_via_clipboard(text);
+        return;
+    }
+    g_dbus_connection_call(bus,
+        "my.id.arkhimuttaqina.Bridge",
+        "/my/id/arkhimuttaqina/Bridge",
+        "my.id.arkhimuttaqina.Bridge",
+        "InsertText",
+        g_variant_new("(s)", text),
+        NULL, G_DBUS_CALL_FLAGS_NONE, 2500, NULL, on_typed_insert_done, g_strdup(text));
+    g_object_unref(bus);
+}
+
 static void on_glyph_clicked(GtkButton *btn, gpointer user_data) {
     const char *glyph = (const char *)user_data;
     GtkWidget *child = btn ? gtk_widget_get_parent(GTK_WIDGET(btn)) : NULL;
     GtkWidget *flow = child ? gtk_widget_get_parent(child) : NULL;
     if (flow && flow == g_emoji_flow) super_v_ui_record_recent("emoji", glyph);
-    super_v_ui_insert_text(glyph);
+    super_v_ui_paste_text(glyph);
     hide_main_window();
 }
 
 static void on_skin_variant_clicked(GtkButton *btn, gpointer user_data) {
     (void)btn;
     const char *variant = (const char *)user_data;
-    super_v_ui_insert_text(variant);
+    super_v_ui_paste_text(variant);
     hide_main_window();
 }
 
@@ -1192,6 +1292,12 @@ static void on_settings_clicked(GtkButton *btn, gpointer user_data) {
 /* Headless verification of the interactive paths: paging, localized search,
    activation, skin-tone popover and GIF listing. Triggered by
    SUPER_V_UI_SELFTEST=1 so it never runs in normal use. */
+static gboolean g_application_quit_wrapper(gpointer data) {
+    (void)data;
+    g_application_quit(G_APPLICATION(g_application_get_default()));
+    return G_SOURCE_REMOVE;
+}
+
 static gboolean run_selftest(gpointer data) {
     (void)data;
 
@@ -1258,6 +1364,13 @@ static gboolean run_selftest(gpointer data) {
     if (g_getenv("SUPER_V_SELFTEST_APIKEY") && g_api_key_hook) {
         g_api_key_hook("smoke-key-1234");
         printf("VERIFY: api_key_hook_called=true\n");
+    }
+    if (g_getenv("SUPER_V_SELFTEST_PASTE")) {
+        super_v_ui_paste_text("PASTE-TEST-VALUE");
+        printf("VERIFY: paste_path_invoked=true\n");
+        fflush(stdout);
+        g_timeout_add(1200, (GSourceFunc)g_application_quit_wrapper, NULL);
+        return G_SOURCE_REMOVE;
     }
     printf("VERIFY: no_crash=true\n");
     fflush(stdout);

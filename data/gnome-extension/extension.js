@@ -1,14 +1,17 @@
 // SPDX-FileCopyrightText: 2026 Arkhi Muttaqina
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// Super-V bridge. Two jobs that a Wayland client cannot do for itself:
-//  1. move the overlay next to the pointer (move_frame + activate),
-//  2. notice clipboard changes while the overlay is not focused, and hand the
-//     text to super-v-ingest (a non-Wayland helper, so the dock never flashes).
-// The placement technique mirrors Clipman's MoveWindowToCursor.
+// Super-V bridge: everything a Wayland client cannot do for itself.
+//  - move the overlay next to the pointer (move_frame + activate)
+//  - paste into the focused app with a virtual keyboard (Ctrl+V, or
+//    Ctrl+Shift+V when a terminal owns the focus)
+//  - watch clipboard changes while the overlay is not focused and hand the
+//    text to super-v-ingest (not a Wayland client, so the dock never flashes)
+// The keystroke recipes and terminal detection follow Clipman, which is known
+// to work in terminals and editors.
 
-import Gio from 'gi://Gio';
 import Clutter from 'gi://Clutter';
+import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import Meta from 'gi://Meta';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
@@ -21,6 +24,9 @@ const IFACE_XML = `
     <method name="MoveWindowToCursor">
       <arg type="s" name="title" direction="in"/>
     </method>
+    <method name="SimulatePaste">
+      <arg type="s" name="mode" direction="in"/>
+    </method>
     <method name="InsertText">
       <arg type="s" name="text" direction="in"/>
     </method>
@@ -31,6 +37,7 @@ const IFACE_XML = `
 </node>`;
 
 const APP_HINTS = ['superv', 'super-v'];
+
 const TEXT_TYPES = [
     'text/plain;charset=utf-8',
     'UTF8_STRING',
@@ -39,6 +46,41 @@ const TEXT_TYPES = [
     'text/uri-list',
 ];
 const MAX_BYTES = 1024 * 1024;
+
+// Terminals paste with Ctrl+Shift+V. Matched against the whole lower-cased
+// app id or its last dotted segment, never as a substring.
+const TERMINAL_APP_IDS = new Set([
+    'org.gnome.terminal', 'gnome-terminal-server', 'gnome-terminal',
+    'org.gnome.ptyxis', 'org.gnome.ptyxis.devel', 'ptyxis',
+    'org.gnome.console', 'org.gnome.console.devel', 'kgx',
+    'com.gexperts.tilix', 'tilix', 'kitty', 'alacritty', 'terminator',
+    'xterm', 'uxterm', 'org.kde.konsole', 'konsole', 'foot', 'footclient',
+    'org.wezfurlong.wezterm', 'wezterm', 'st', 'st-256color', 'sakura',
+    'xfce4-terminal', 'mate-terminal', 'lxterminal', 'guake', 'tilda',
+    'cool-retro-term', 'com.raggesilver.blackbox', 'com.mitchellh.ghostty',
+    'io.elementary.terminal', 'terminology', 'rio',
+]);
+
+function _isTerminal(appId) {
+    const id = (appId ?? '').toLowerCase();
+    if (!id)
+        return false;
+    return TERMINAL_APP_IDS.has(id) ||
+        TERMINAL_APP_IDS.has(id.slice(id.lastIndexOf('.') + 1));
+}
+
+const PASTE_RECIPES = Object.assign(Object.create(null), {
+    'ctrl-v': {modifiers: ['Control_L'], key: 'v'},
+    'ctrl-shift-v': {modifiers: ['Control_L', 'Shift_L'], key: 'v'},
+    'shift-insert': {modifiers: ['Shift_L'], key: 'Insert'},
+});
+
+const KEY_LOOKUP = Object.assign(Object.create(null), {
+    'Control_L': Clutter.KEY_Control_L,
+    'Shift_L': Clutter.KEY_Shift_L,
+    'v': Clutter.KEY_v,
+    'Insert': Clutter.KEY_Insert,
+});
 
 export default class SuperVBridgeExtension extends Extension {
     enable() {
@@ -52,6 +94,7 @@ export default class SuperVBridgeExtension extends Extension {
         this._ownerChangedId = this._selection.connect(
             'owner-changed', this._onOwnerChanged.bind(this));
         this._timeout = 0;
+        this._virtualKeyboard = null;
     }
 
     disable() {
@@ -64,6 +107,10 @@ export default class SuperVBridgeExtension extends Extension {
             this._ownerChangedId = 0;
         }
         this._selection = null;
+        if (this._virtualKeyboard) {
+            this._virtualKeyboard.run_dispose();
+            this._virtualKeyboard = null;
+        }
         if (this._nameId) {
             Gio.bus_unown_name(this._nameId);
             this._nameId = 0;
@@ -74,7 +121,103 @@ export default class SuperVBridgeExtension extends Extension {
         }
     }
 
-    // ---- clipboard capture -------------------------------------------
+    // ---- typed paste ----------------------------------------------------
+
+    _backend() {
+        // Clutter.get_default_backend() was removed in GNOME Shell 51.
+        return Clutter.get_default_backend
+            ? Clutter.get_default_backend()
+            : global.stage.context.get_backend();
+    }
+
+    _getVirtualKeyboard() {
+        if (!this._virtualKeyboard) {
+            const seat = this._backend().get_default_seat();
+            this._virtualKeyboard = seat.create_virtual_device(
+                Clutter.InputDeviceType.KEYBOARD_DEVICE);
+        }
+        return this._virtualKeyboard;
+    }
+
+    _resolveRecipe(mode) {
+        if (typeof mode === 'string' && Object.hasOwn(PASTE_RECIPES, mode))
+            return PASTE_RECIPES[mode];
+
+        const focus = global.display.get_focus_window();
+        const appId = focus ? (focus.get_gtk_application_id?.() ||
+            focus.get_wm_class() || '') : '';
+        return _isTerminal(appId)
+            ? PASTE_RECIPES['ctrl-shift-v'] : PASTE_RECIPES['ctrl-v'];
+    }
+
+    _dispatchKeystroke(recipe) {
+        const vk = this._getVirtualKeyboard();
+        if (!vk)
+            throw new Error('virtual keyboard unavailable');
+
+        const pressed = [];
+        try {
+            for (const mod of recipe.modifiers) {
+                vk.notify_keyval(Clutter.CURRENT_TIME,
+                    KEY_LOOKUP[mod], Clutter.KeyState.PRESSED);
+                pressed.push(mod);
+            }
+            vk.notify_keyval(Clutter.CURRENT_TIME,
+                KEY_LOOKUP[recipe.key], Clutter.KeyState.PRESSED);
+            vk.notify_keyval(Clutter.CURRENT_TIME,
+                KEY_LOOKUP[recipe.key], Clutter.KeyState.RELEASED);
+        } finally {
+            for (const mod of pressed) {
+                vk.notify_keyval(Clutter.CURRENT_TIME,
+                    KEY_LOOKUP[mod], Clutter.KeyState.RELEASED);
+            }
+        }
+    }
+
+    SimulatePasteAsync([mode], invocation) {
+        try {
+            this._dispatchKeystroke(this._resolveRecipe(mode));
+            invocation.return_value(null);
+        } catch (e) {
+            invocation.return_dbus_error(
+                'my.id.arkhimuttaqina.Bridge.Error', e.message);
+        }
+    }
+
+    InsertTextAsync([text], invocation) {
+        try {
+            this._insertText(text);
+            invocation.return_value(null);
+        } catch (e) {
+            invocation.return_dbus_error(
+                'my.id.arkhimuttaqina.Bridge.Error', e.message);
+        }
+    }
+
+    _insertText(text) {
+        if (!text)
+            return;
+        const vk = this._getVirtualKeyboard();
+        if (!vk)
+            throw new Error('virtual keyboard unavailable');
+        const now = Clutter.CURRENT_TIME;
+        for (const ch of text) {
+            const cp = ch.codePointAt(0);
+            let keysym;
+            if (ch === '\n')
+                keysym = 0xff0d;
+            else if (ch === '\t')
+                keysym = 0xff09;
+            else if (cp <= 0xffff)
+                keysym = cp;
+            else
+                keysym = 0x01000000 + cp;
+            vk.notify_keyval(now, keysym, Clutter.KeyState.PRESSED);
+            vk.notify_keyval(now, keysym, Clutter.KeyState.RELEASED);
+        }
+    }
+
+    // ---- clipboard capture ----------------------------------------------
 
     _onOwnerChanged(_selection, selectionType, source) {
         if (selectionType !== Meta.SelectionType.SELECTION_CLIPBOARD)
@@ -143,57 +286,12 @@ export default class SuperVBridgeExtension extends Extension {
             try {
                 GLib.unlink(path);
             } catch {
-                // Nothing else to do; the next copy retries.
+                // The next copy retries.
             }
         }
     }
 
-    // ---- typed insertion ------------------------------------------------
-
-    InsertTextAsync([text], invocation) {
-        try {
-            this._insertText(text);
-            invocation.return_value(null);
-        } catch (e) {
-            invocation.return_dbus_error(
-                'my.id.arkhimuttaqina.Bridge.Error', e.message);
-        }
-    }
-
-    // Types the string through a virtual keyboard so the clipboard is never
-    // touched: picking an emoji no longer overwrites what you copied.
-    _insertText(text) {
-        if (!text)
-            return;
-        const seat = Clutter.get_default_backend().get_default_seat();
-        const device = seat.create_virtual_device(
-            Clutter.InputDeviceType.KEYBOARD_DEVICE);
-        if (!device)
-            throw new Error('virtual keyboard unavailable');
-
-        const now = Clutter.CURRENT_TIME;
-        try {
-            for (const ch of text) {
-                const cp = ch.codePointAt(0);
-                let keysym;
-                if (ch === '\n')
-                    keysym = 0xff0d;
-                else if (ch === '\t')
-                    keysym = 0xff09;
-                else if (cp <= 0xffff)
-                    keysym = cp;
-                else
-                    keysym = 0x01000000 + cp;
-                device.notify_keyval(now, keysym, Clutter.KeyState.PRESSED);
-                device.notify_keyval(now, keysym, Clutter.KeyState.RELEASED);
-            }
-        } finally {
-            device.run_dispose();
-        }
-    }
-
-    // ---- placement ----------------------------------------------------
-
+    // ---- placement ------------------------------------------------------
 
     Ping() {
         return 'pong';
