@@ -36,7 +36,7 @@ Validated deterministically via `autoresearch.sh`:
 - **Multi-Compositor Auto-Detection:** Wayland client, GNOME Wayland bridge extension, and X11 (`libX11` + `libXtst`).
 - **Rich Pickers:**
   - Clipboard history with pinning, delete, deduplication, secret masking and SQLite FTS5 search
-  - 1,914 emoji with skin-tone variants (306 support modifiers) and **multilingual search**
+  - **3,963 emoji** = every fully-qualified RGI sequence of Unicode Emoji 18.0, including 2,040 skin-tone variants, 1,614 ZWJ sequences and 262 flags, with **multilingual search** (see [docs/GLYPHS.md](docs/GLYPHS.md))
   - 1,073 math, currency, arrow, Greek and punctuation symbols (also searchable)
   - GIF tab: local library plus Tenor when an API key is configured
 - **Instant Synthetic Paste:** Auto-pastes the selection into the active client via XTest or the virtual-keyboard protocol; the UI also owns the clipboard so manual `Ctrl+V` works.
@@ -52,6 +52,21 @@ Search understands everyday words, not just Unicode names:
 ```
 
 Languages ship in `data/glyphs/i18n.json`. Adding a language is a data-only change — open a PR with a new top-level key (for example `"jv"` for Javanese) mapping words to English Unicode name/keyword tokens. Preferences → *Emoji & Symbols* selects which languages are active (English + Indonesian by default).
+
+Tone and gender queries work too: `warna kulit gelap`, `light skin tone`, `women holding hands`. Direct code points are accepted as `1f44b`, `U+1F44B` or `0x1F44B`, and Unicode shortcodes as `:wave:`.
+
+### Emoji data pipeline
+
+The dataset is generated, not curated: `tools/glyph-generator/generate.py` parses the pinned official Unicode Emoji 18.0 files plus CLDR 46 annotations and writes `data/glyphs/emojis.json`, `data/glyphs/glyph-meta.json` and `docs/glyph-coverage.md`.
+
+```sh
+python3 tools/glyph-generator/generate.py           # regenerate
+python3 tools/glyph-generator/generate.py --check   # fail if stale
+cargo test -p super-v-core --test glyph_tests       # coverage + search contract
+cargo run --release -p super-v-core --bin bench_glyphs
+```
+
+Schema, skin-tone model, ranking rules, validation matrix and measured performance live in [docs/GLYPHS.md](docs/GLYPHS.md).
 
 ---
 
