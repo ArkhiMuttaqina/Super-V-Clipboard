@@ -18,6 +18,8 @@ pub enum IpcRequest {
     ClearUnpinned,
     /// Search items via SQLite FTS5
     Search { query: String, limit: usize },
+    /// Enforce storage retention limits
+    EnforceRetention { max_count: usize, max_bytes: usize },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,6 +27,7 @@ pub enum IpcRequest {
 pub enum IpcResponse {
     History(Vec<ClipboardItem>),
     SearchResult(Vec<ClipboardItem>),
+    RetentionResult { evicted_count: usize },
     Ack,
     Error(String),
 }

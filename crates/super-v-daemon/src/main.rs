@@ -126,6 +126,11 @@ async fn main() -> Result<()> {
     let hypr_rules = super_v_core::backend::HyprlandHelper::HYPRLAND_RULES;
     assert!(hypr_rules.contains("windowrulev2"), "Hyprland rules must contain windowrulev2");
 
+    // Test client IPC EnforceRetention
+    let retention_res = client.enforce_retention(50, 20 * 1024 * 1024).await?;
+    log::info!("Client IPC enforce_retention evicted: {}", retention_res);
+
+    println!("VERIFY: ipc_retention_ok=true, evicted={}", retention_res);
     println!("VERIFY: hyprland_rules_verified=true, is_hypr={}", is_hypr);
     println!("VERIFY: gnome_bridge_installed={},", gnome_bridge_installed);
     println!("VERIFY: backup_restore_ok=true, exported={}, imported={}", exported_count, imported_count);

@@ -103,8 +103,14 @@ impl IpcServer {
                         Err(e) => IpcResponse::Error(e.to_string()),
                     }
                 }
+                Ok(IpcRequest::EnforceRetention { max_count, max_bytes }) => {
+                    let mut db = db.lock().await;
+                    match db.enforce_retention_limits(max_count, max_bytes) {
+                        Ok(evicted_count) => IpcResponse::RetentionResult { evicted_count },
+                        Err(e) => IpcResponse::Error(e.to_string()),
+                    }
+                }
                 Ok(IpcRequest::PasteItem { id }) => {
-                    // Trigger synthetic paste
                     match injector.paste() {
                         Ok(_) => {
                             log::info!("Paste triggered for item id={}", id);

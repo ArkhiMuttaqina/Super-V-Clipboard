@@ -73,4 +73,12 @@ impl IpcClient {
             other => Err(anyhow!("Unexpected response: {:?}", other)),
         }
     }
+
+    pub async fn enforce_retention(&mut self, max_count: usize, max_bytes: usize) -> Result<usize> {
+        match self.send_request(&IpcRequest::EnforceRetention { max_count, max_bytes }).await? {
+            IpcResponse::RetentionResult { evicted_count } => Ok(evicted_count),
+            IpcResponse::Error(e) => Err(anyhow!("Daemon error: {}", e)),
+            other => Err(anyhow!("Unexpected response: {:?}", other)),
+        }
+    }
 }
