@@ -52,6 +52,8 @@ extern "C" {
         is_sensitive: c_int,
         id: libc::c_longlong,
         preview_image_path: *const c_char,
+        created_at: libc::c_longlong,
+        mime: *const c_char,
     );
     fn super_v_ui_clear_history_items();
     fn super_v_ui_add_glyph_item(
@@ -604,6 +606,7 @@ extern "C" fn on_primary_activated() {
         let c_title = CString::new(title.replace('\0', "")).unwrap_or_default();
         let c_sub = CString::new(subtitle).unwrap_or_default();
         let c_blob = CString::new(item.blob_path.unwrap_or_default()).unwrap_or_default();
+        let c_mime = CString::new(item.mime.clone()).unwrap_or_default();
         unsafe {
             super_v_ui_add_history_item(
                 c_title.as_ptr(), c_sub.as_ptr(),
@@ -611,6 +614,8 @@ extern "C" fn on_primary_activated() {
                 if item.is_sensitive { 1 } else { 0 },
                 item.id.unwrap_or(0) as libc::c_longlong,
                 c_blob.as_ptr(),
+                item.created_at as libc::c_longlong,
+                c_mime.as_ptr(),
             );
         }
     }

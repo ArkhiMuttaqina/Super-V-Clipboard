@@ -110,6 +110,27 @@ impl IpcServer {
                         Err(e) => IpcResponse::Error(e.to_string()),
                     }
                 }
+                Ok(IpcRequest::IngestFile { mime, path }) => {
+                    let data = std::fs::read(&path);
+                    let _ = std::fs::remove_file(&path);
+                    match data {
+                        Ok(bytes) => {
+                            let store = super_v_core::BlobStore::new(
+                                super_v_core::default_blob_dir());
+                            match store {
+                                Ok(store) => {
+                                    let mut db = db.lock().await;
+                                    match db.insert_image(&store, &mime, &bytes) {
+                                        Ok(item) => IpcResponse::History(vec![item]),
+                                        Err(e) => IpcResponse::Error(e.to_string()),
+                                    }
+                                }
+                                Err(e) => IpcResponse::Error(e.to_string()),
+                            }
+                        }
+                        Err(e) => IpcResponse::Error(e.to_string()),
+                    }
+                }
                 Ok(IpcRequest::Ingest { mime, text }) => {
                     let mut db = db.lock().await;
                     match db.insert_or_touch(&mime, text.as_bytes(), Some(text.as_str())) {

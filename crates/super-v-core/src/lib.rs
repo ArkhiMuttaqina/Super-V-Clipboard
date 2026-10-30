@@ -13,6 +13,7 @@ pub mod secret_filter;
 
 use anyhow::Result;
 use rusqlite::{params, Connection};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
@@ -23,7 +24,19 @@ pub use gif_scanner::{GifItem, GifScanner};
 pub use positioning::{Point, Rect, WindowPlacer};
 pub use secret_filter::SecretFilter;
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+/// Blob directory shared by the daemon and the CLI helpers.
+pub fn default_blob_dir() -> std::path::PathBuf {
+    let base = std::env::var("XDG_DATA_HOME").ok()
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+            std::path::PathBuf::from(home).join(".local").join("share")
+        });
+    base.join("super-v-clipboard").join("blobs")
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClipboardItem {
     pub id: Option<i64>,
     pub hash: String,
@@ -122,6 +135,44 @@ impl Database {
             blob_path: None,
             is_pinned: false,
             is_sensitive,
+            byte_size: data.len(),
+            created_at: now,
+        })
+    }
+
+
+    /// Store an image payload in the blob store and record it in the history.
+    pub fn insert_image(&mut self, store: &BlobStore, mime: &str, data: &[u8]) -> Result<ClipboardItem> {
+        let ext = match mime {
+            "image/jpeg" => "jpg",
+            "image/webp" => "webp",
+            "image/gif" => "gif",
+            "image/bmp" => "bmp",
+            _ => "png",
+        };
+        let (hash, path) = store.write_blob(data, ext)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs() as i64;
+        let category = ContentCategory::classify(mime, None);
+
+        self.conn.execute(
+            "INSERT INTO entries (hash, mime, text, category, blob_path, is_sensitive, byte_size, created_at)
+             VALUES (?1, ?2, NULL, ?3, ?4, 0, ?5, ?6)
+             ON CONFLICT(hash) DO UPDATE SET created_at = excluded.created_at, blob_path = excluded.blob_path",
+            params![hash, mime, category.as_str(), path.to_string_lossy().to_string(), data.len(), now],
+        )?;
+
+        let id = self.conn.last_insert_rowid();
+        Ok(ClipboardItem {
+            id: Some(id),
+            hash,
+            mime: mime.to_string(),
+            text: None,
+            category,
+            blob_path: Some(path.to_string_lossy().to_string()),
+            is_pinned: false,
+            is_sensitive: false,
             byte_size: data.len(),
             created_at: now,
         })

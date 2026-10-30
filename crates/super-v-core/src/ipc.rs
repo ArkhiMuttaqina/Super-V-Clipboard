@@ -22,6 +22,8 @@ pub enum IpcRequest {
     EnforceRetention { max_count: usize, max_bytes: usize },
     /// Store text captured by the UI process (which owns the Wayland clipboard)
     Ingest { mime: String, text: String },
+    /// Store an image the UI or the bridge captured to a temporary file
+    IngestFile { mime: String, path: String },
     /// Inject Ctrl+V into the focused application without a history row
     InjectPaste,
 }

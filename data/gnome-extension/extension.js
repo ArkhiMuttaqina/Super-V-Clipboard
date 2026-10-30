@@ -48,7 +48,8 @@ const TEXT_TYPES = [
     'STRING',
     'text/uri-list',
 ];
-const MAX_BYTES = 1024 * 1024;
+const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/bmp'];
+const MAX_BYTES = 8 * 1024 * 1024;
 
 // Terminals paste with Ctrl+Shift+V. Matched against the whole lower-cased
 // app id or its last dotted segment, never as a substring.
@@ -101,6 +102,7 @@ export default class SuperVBridgeExtension extends Extension {
         this._prevFocus = null;
         this._source = null;
         this._lastText = '';
+        this._lastImageKey = '';
         this._pollId = GLib.timeout_add(
             GLib.PRIORITY_DEFAULT, 800, () => {
                 this._pollSelection();
@@ -298,7 +300,9 @@ export default class SuperVBridgeExtension extends Extension {
         if (!source)
             return;
         const offered = source.get_mimetypes();
-        const mime = TEXT_TYPES.find(t => offered.includes(t));
+        const textMime = TEXT_TYPES.find(t => offered.includes(t));
+        const imageMime = IMAGE_TYPES.find(t => offered.includes(t));
+        const mime = textMime || imageMime;
         if (!mime)
             return;
 
@@ -319,35 +323,60 @@ export default class SuperVBridgeExtension extends Extension {
                 }
                 if (!bytes || bytes.get_size() === 0)
                     return;
-                let text;
-                try {
-                    text = new TextDecoder('utf-8').decode(bytes.get_data());
-                } catch {
+
+                if (textMime) {
+                    let text;
+                    try {
+                        text = new TextDecoder('utf-8').decode(bytes.get_data());
+                    } catch {
+                        return;
+                    }
+                    if (!text || text === this._lastText)
+                        return;
+                    this._lastText = text;
+                    this._handOff(text, mime, null, true);
                     return;
                 }
-                if (text === this._lastText)
+
+                const imageKey = `${mime}:${bytes.get_size()}`;
+                if (imageKey === this._lastImageKey)
                     return;
-                this._lastText = text;
-                this._handOff(text);
+                this._lastImageKey = imageKey;
+                this._handOff(null, mime, bytes.get_data(), false);
             });
     }
 
-    _handOff(text) {
-        if (!text || !text.trim())
-            return;
+    _handOff(payload, mime, rawBytes, isText) {
+        const exe = GLib.find_program_in_path('super-v-ingest') ||
+            GLib.build_filenamev([GLib.get_home_dir(), '.local', 'bin', 'super-v-ingest']);
+        const ext = mime === 'image/png' ? 'png'
+            : mime === 'image/jpeg' ? 'jpg'
+            : mime === 'image/webp' ? 'webp'
+            : mime === 'image/gif' ? 'gif'
+            : mime === 'image/bmp' ? 'bmp'
+            : 'txt';
         const path = GLib.build_filenamev([
             GLib.get_tmp_dir(),
-            `super-v-ingest-${GLib.get_monotonic_time()}.txt`,
+            `super-v-ingest-${GLib.get_monotonic_time()}.${ext}`,
         ]);
+
         try {
-            GLib.file_set_contents(path, text);
+            if (isText) {
+                if (!payload || !payload.trim())
+                    return;
+                GLib.file_set_contents(path, payload);
+            } else {
+                if (!rawBytes || rawBytes.length === 0)
+                    return;
+                GLib.file_set_contents(path, rawBytes);
+            }
         } catch {
             return;
         }
-        const exe = GLib.find_program_in_path('super-v-ingest') ||
-            GLib.build_filenamev([GLib.get_home_dir(), '.local', 'bin', 'super-v-ingest']);
+
         try {
-            GLib.spawn_async(null, [exe, path], null, GLib.SpawnFlags.NONE, null);
+            GLib.spawn_async(null, [exe, '--mime', mime, path], null,
+                GLib.SpawnFlags.NONE, null);
         } catch {
             try {
                 GLib.unlink(path);

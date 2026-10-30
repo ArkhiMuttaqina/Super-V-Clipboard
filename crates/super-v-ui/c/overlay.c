@@ -15,6 +15,8 @@
 static GtkWidget *g_main_window = NULL;
 static GtkWidget *g_stack = NULL;
 static GtkWidget *g_clip_list = NULL;
+static GtkWidget *g_empty_label = NULL;
+static GtkWidget *g_bridge_banner = NULL;
 static GtkWidget *g_search_entry = NULL;
 static GtkWidget *g_emoji_flow = NULL;
 static GtkWidget *g_recent_emoji_flow = NULL;
@@ -66,6 +68,11 @@ static GtkWidget *make_thumb(const char *path, int size);
 static void select_combo(GtkWidget *combo, guint idx);
 static gboolean place_after_map(gpointer data);
 static void paste_after_hide(const char *text);
+static void refresh_bridge_status(void);
+typedef struct { char *text; } PasteAction;
+static gboolean do_paste_action(gpointer data);
+static void paste_image_after_hide(const char *path);
+
 static void on_history_row_activated(AdwActionRow *row, gpointer data);
 static void sync_clipboard_once(void);
 static gboolean sync_clipboard_idle(gpointer data);
@@ -96,6 +103,8 @@ static void install_css(void) {
         ".gif-cell { padding: 0; }\n"
         ".gif-cell image { border-radius: 8px; }\n"
         ".superv-overlay { background: transparent; }\n"
+        ".variant-dot { font-size: 9px; opacity: 0.55; margin-bottom: 1px; }\n"
+        ".warning-banner { background-color: alpha(@warning_color, 0.18); border-radius: 10px; padding: 8px; }\n"
         ".superv-card { background-color: @window_bg_color; border-radius: 14px; border: 1px solid @borders; box-shadow: 0 8px 28px rgba(0,0,0,0.35); }\n";
     gtk_css_provider_load_from_string(p, css);
     gtk_style_context_add_provider_for_display(gdk_display_get_default(),
@@ -175,14 +184,43 @@ static void on_row_click_released(GtkGestureClick *gesture, int n_press, double 
     if (click_hit_button(row, x, y)) return;
     on_history_row_activated(ADW_ACTION_ROW(row), NULL);
 }
+static void paste_image_after_hide(const char *path) {
+    if (!path || !*path) return;
+    GError *err = NULL;
+    GFile *file = g_file_new_for_path(path);
+    GdkTexture *texture = gdk_texture_new_from_file(file, &err);
+    g_object_unref(file);
+    if (!texture) {
+        if (err) g_error_free(err);
+        return;
+    }
+    GdkDisplay *d = gdk_display_get_default();
+    if (d) {
+        GdkContentProvider *provider =
+            gdk_content_provider_new_typed(GDK_TYPE_TEXTURE, texture);
+        gdk_clipboard_set_content(gdk_display_get_clipboard(d), provider);
+        g_object_unref(provider);
+    }
+    g_object_unref(texture);
+
+    hide_main_window();
+    g_timeout_add(90, do_paste_action, g_new0(PasteAction, 1));
+}
+
 static void on_history_row_activated(AdwActionRow *row, gpointer data) {
     (void)data;
     gint64 now = g_get_monotonic_time();
     if (now - g_last_pick_us < 300000) return;   /* one pick per gesture */
     g_last_pick_us = now;
     const char *text = (const char *)g_object_get_data(G_OBJECT(row), "super_v_text");
-    if (text && *text) {
+    const char *blob = (const char *)g_object_get_data(G_OBJECT(row), "super_v_blob");
+    const char *mime = (const char *)g_object_get_data(G_OBJECT(row), "super_v_mime");
+    if (text && *text && (!mime || !g_str_has_prefix(mime, "image/"))) {
         paste_after_hide(text);
+        return;
+    }
+    if (blob && *blob && mime && g_str_has_prefix(mime, "image/")) {
+        paste_image_after_hide(blob);
         return;
     }
     gint64 *pid = (gint64 *)g_object_get_data(G_OBJECT(row), "super_v_id");
@@ -260,8 +298,60 @@ static gboolean filter_clip_row(GtkListBoxRow *row, gpointer user_data) {
     return match;
 }
 
-void super_v_ui_add_history_item(const char *title, const char *subtitle, int is_pinned, int is_sensitive, long long id, const char *preview_image_path) {
+/* Escape user text for Pango markup and prefix it with a small timestamp. */
+static char *history_markup(const char *text, long long created_at, int is_pinned) {
+    char *escaped = g_markup_escape_text(text ? text : "", -1);
+    char stamp[64] = "";
+    if (created_at > 0) {
+        GDateTime *dt = g_date_time_new_from_unix_local((gint64)created_at);
+        if (dt) {
+            char *formatted = g_date_time_format(dt, "%d %b %H:%M");
+            if (formatted) {
+                g_strlcpy(stamp, formatted, sizeof(stamp));
+                g_free(formatted);
+            }
+            g_date_time_unref(dt);
+        }
+    }
+    char *result;
+    if (stamp[0]) {
+        result = g_strdup_printf(
+            "<span size=\"smaller\" alpha=\"55%%\">%s</span>  <span%s>%s</span>",
+            stamp, is_pinned ? " weight=\"bold\"" : "", escaped);
+    } else {
+        result = g_strdup_printf("<span%s>%s</span>", is_pinned ? " weight=\"bold\"" : "", escaped);
+    }
+    g_free(escaped);
+    return result;
+}
+
+/* Section headers make the pinned block visually separate from the rest. */
+static void history_header_func(GtkListBoxRow *row, GtkListBoxRow *before, gpointer data) {
+    (void)data;
+    static const char *prev_key = NULL;
+    (void)prev_key;
+    gboolean pinned = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(row), "super_v_pinned"));
+    gboolean before_pinned = before ? GPOINTER_TO_INT(g_object_get_data(G_OBJECT(before), "super_v_pinned")) : FALSE;
+    gboolean need = (before == NULL && pinned) ||
+        (before != NULL && pinned != before_pinned) ||
+        (before == NULL && !pinned);
+    if (!need) {
+        gtk_list_box_row_set_header(row, NULL);
+        return;
+    }
+    GtkWidget *label = gtk_label_new(pinned ? "Pinned" : "Recent");
+    gtk_widget_add_css_class(label, "dim-label");
+    gtk_widget_add_css_class(label, "section-label");
+    gtk_widget_set_halign(label, GTK_ALIGN_START);
+    gtk_widget_set_margin_start(label, 6);
+    gtk_widget_set_margin_top(label, 6);
+    gtk_widget_set_margin_bottom(label, 2);
+    gtk_list_box_row_set_header(row, label);
+    gtk_widget_set_visible(label, TRUE);
+}
+void super_v_ui_add_history_item(const char *title, const char *subtitle, int is_pinned, int is_sensitive, long long id, const char *preview_image_path, long long created_at, const char *mime) {
     if (!g_clip_list) return;
+    if (g_empty_label) gtk_widget_set_visible(g_empty_label, FALSE);
 
     AdwActionRow *row = ADW_ACTION_ROW(adw_action_row_new());
     adw_preferences_row_set_use_markup(ADW_PREFERENCES_ROW(row), FALSE);
@@ -274,15 +364,24 @@ void super_v_ui_add_history_item(const char *title, const char *subtitle, int is
             for (gsize i = 3; i < len; i++) masked[i] = '*';
         }
         g_object_set_data_full(G_OBJECT(row), "super_v_masked", masked, g_free);
-        adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row), title ? title : "");
+        char *markup = history_markup(title, created_at, is_pinned);
+        adw_preferences_row_set_use_markup(ADW_PREFERENCES_ROW(row), TRUE);
+        adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row), markup);
+        g_free(markup);
         g_object_set_data(G_OBJECT(row), "super_v_revealed", GINT_TO_POINTER(1));
     } else {
-        adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row), title ? title : "(Empty)");
+        char *markup = history_markup(title, created_at, is_pinned);
+        adw_preferences_row_set_use_markup(ADW_PREFERENCES_ROW(row), TRUE);
+        adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row), markup);
+        g_free(markup);
     }
 
     if (subtitle && *subtitle) {
         adw_action_row_set_subtitle(ADW_ACTION_ROW(row), subtitle);
     }
+    g_object_set_data(G_OBJECT(row), "super_v_pinned", GINT_TO_POINTER(is_pinned ? 1 : 0));
+    if (mime) g_object_set_data_full(G_OBJECT(row), "super_v_mime", g_strdup(mime), g_free);
+    if (preview_image_path) g_object_set_data_full(G_OBJECT(row), "super_v_blob", g_strdup(preview_image_path), g_free);
     if (is_pinned) {
         gtk_widget_add_css_class(GTK_WIDGET(row), "pinned-row");
     }
@@ -298,8 +397,11 @@ void super_v_ui_add_history_item(const char *title, const char *subtitle, int is
     g_object_set_data_full(G_OBJECT(row), "super_v_id", heap_id, g_free);
 
     if (preview_image_path && *preview_image_path) {
-        GtkWidget *thumb = make_thumb(preview_image_path, 40);
+        GtkWidget *thumb = make_thumb(preview_image_path, 56);
         if (thumb) adw_action_row_add_prefix(ADW_ACTION_ROW(row), thumb);
+    } else if (mime && g_str_has_prefix(mime, "image/")) {
+        GtkWidget *icon = gtk_image_new_from_icon_name("image-x-generic-symbolic");
+        adw_action_row_add_prefix(ADW_ACTION_ROW(row), icon);
     }
 
     if (is_sensitive) {
@@ -326,6 +428,7 @@ void super_v_ui_add_history_item(const char *title, const char *subtitle, int is
 }
 
 void super_v_ui_clear_history_items(void) {
+    if (g_empty_label) gtk_widget_set_visible(g_empty_label, TRUE);
     if (!g_clip_list) return;
     GtkWidget *child = gtk_widget_get_first_child(g_clip_list);
     while (child) {
@@ -392,7 +495,6 @@ void super_v_ui_insert_text(const char *text) {
 static void simulate_paste(void);
 static void restore_clipboard_later(void);
 
-typedef struct { char *text; } PasteAction;
 
 static gboolean do_paste_action(gpointer data) {
     PasteAction *action = (PasteAction *)data;
@@ -510,52 +612,204 @@ static void on_popover_closed(GtkPopover *popover, gpointer user_data) {
     gtk_widget_unparent(GTK_WIDGET(popover));
 }
 
-static void on_emoji_right_clicked(GtkGestureClick *gesture, int n_press, double x, double y, gpointer user_data) {
-    (void)n_press; (void)x; (void)y;
-    GtkWidget *btn = GTK_WIDGET(user_data);
-    const char *base = (const char *)g_object_get_data(G_OBJECT(btn), "base_emoji");
-    if (!base) return;
-    if (gesture) gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
+/* Skin-tone handling.
+ * A modifier belongs immediately after the person component, never at the end
+ * of the sequence: appending it to a ZWJ family produced the stray coloured
+ * squares people were seeing.
+ */
+static gboolean is_skin_modifier(gunichar cp) {
+    return cp >= 0x1F3FB && cp <= 0x1F3FF;
+}
 
-    static const char *mods[] = { "", "\xf0\x9f\x8f\xbb", "\xf0\x9f\x8f\xbc", "\xf0\x9f\x8f\xbd", "\xf0\x9f\x8f\xbe", "\xf0\x9f\x8f\xbf" };
+static gboolean tone_capable(gunichar cp) {
+    if ((cp >= 0x1F466 && cp <= 0x1F469) || (cp >= 0x1F475 && cp <= 0x1F478)) return TRUE;
+    if (cp >= 0x1F446 && cp <= 0x1F450) return TRUE;
+    if (cp >= 0x1F466 && cp <= 0x1F487) return TRUE;
+    if (cp >= 0x1F918 && cp <= 0x1F93E) return TRUE;
+    if (cp >= 0x1F9B5 && cp <= 0x1F9BB) return TRUE;
+    if (cp >= 0x1F9CD && cp <= 0x1F9CF) return TRUE;
+    if (cp >= 0x1FAC3 && cp <= 0x1FAC5) return TRUE;
+    if (cp >= 0x1FAF0 && cp <= 0x1FAF8) return TRUE;
+    switch (cp) {
+        case 0x1F385: case 0x1F3C2: case 0x1F3C3: case 0x1F3C4: case 0x1F3C7:
+        case 0x1F3CA: case 0x1F3CB: case 0x1F3CC: case 0x1F442: case 0x1F443:
+        case 0x1F46E: case 0x1F470: case 0x1F471: case 0x1F472: case 0x1F473:
+        case 0x1F47C: case 0x1F481: case 0x1F482: case 0x1F483: case 0x1F485:
+        case 0x1F486: case 0x1F487: case 0x1F4AA: case 0x1F574: case 0x1F575:
+        case 0x1F57A: case 0x1F590: case 0x1F595: case 0x1F596: case 0x1F645:
+        case 0x1F646: case 0x1F647: case 0x1F64B: case 0x1F64C: case 0x1F64D:
+        case 0x1F64E: case 0x1F64F: case 0x1F6A3: case 0x1F6B4: case 0x1F6B5:
+        case 0x1F6B6: case 0x1F6C0: case 0x1F6CC: case 0x1F90C: case 0x1F90F:
+        case 0x1F926: case 0x1F930: case 0x1F931: case 0x1F932: case 0x1F933:
+        case 0x1F934: case 0x1F935: case 0x1F936: case 0x1F937: case 0x1F938:
+        case 0x1F939: case 0x1F93C: case 0x1F93D: case 0x1F93E: case 0x1F977:
+        case 0x261D: case 0x26F9: case 0x270A: case 0x270B: case 0x270C:
+        case 0x270D:
+            return TRUE;
+        default:
+            return FALSE;
+    }
+}
+
+static int utf8_seq_len(unsigned char lead) {
+    if (lead < 0x80) return 1;
+    if ((lead & 0xE0) == 0xC0) return 2;
+    if ((lead & 0xF0) == 0xE0) return 3;
+    if ((lead & 0xF8) == 0xF0) return 4;
+    return 1;
+}
+
+static gunichar utf8_decode_at(const char *s, int *len_out) {
+    int len = utf8_seq_len((unsigned char)s[0]);
+    *len_out = len;
+    return g_utf8_get_char(s);
+}
+
+/* Returns a newly allocated variant with the modifier inserted after the first
+ * tone-capable codepoint, or NULL when the glyph cannot take one. */
+static char *skin_variant(const char *base, const char *modifier) {
+    if (!base || !*base) return NULL;
+    GString *stripped = g_string_new(NULL);
+    const char *p = base;
+    while (*p) {
+        int len = 0;
+        gunichar cp = utf8_decode_at(p, &len);
+        if (!is_skin_modifier(cp)) g_string_append_len(stripped, p, len);
+        p += len;
+    }
+
+    if (!g_str_has_prefix(modifier, "")) { /* keep compiler happy about unused */ }
+
+    GString *out = g_string_new(NULL);
+    const char *q = stripped->str;
+    gboolean inserted = FALSE;
+    while (*q) {
+        int len = 0;
+        gunichar cp = utf8_decode_at(q, &len);
+        g_string_append_len(out, q, len);
+        if (!inserted && tone_capable(cp)) {
+            g_string_append(out, modifier);
+            inserted = TRUE;
+        }
+        q += len;
+    }
+    g_string_free(stripped, TRUE);
+    if (!inserted) {
+        g_string_free(out, TRUE);
+        return NULL;
+    }
+    return g_string_free(out, FALSE);
+}
+
+static gboolean glyph_has_tone_variants(const char *glyph) {
+    if (!glyph) return FALSE;
+    const char *p = glyph;
+    while (*p) {
+        int len = 0;
+        gunichar cp = utf8_decode_at(p, &len);
+        if (tone_capable(cp)) return TRUE;
+        p += len;
+    }
+    return FALSE;
+}
+
+static gboolean glyph_is_only_modifiers(const char *glyph) {
+    if (!glyph || !*glyph) return TRUE;
+    gboolean any = FALSE;
+    const char *p = glyph;
+    while (*p) {
+        int len = 0;
+        gunichar cp = utf8_decode_at(p, &len);
+        if (!is_skin_modifier(cp) && cp != 0x200D) return FALSE;
+        any = TRUE;
+        p += len;
+    }
+    return any;
+}
+
+static void show_variant_popover(GtkWidget *btn, const char *base) {
+    static const char *mods[] = { "", "\xF0\x9F\x8F\xBB", "\xF0\x9F\x8F\xBC",
+                                  "\xF0\x9F\x8F\xBD", "\xF0\x9F\x8F\xBE", "\xF0\x9F\x8F\xBF" };
 
     GtkWidget *popover = gtk_popover_new();
     gtk_widget_set_parent(popover, btn);
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
     gtk_popover_set_child(GTK_POPOVER(popover), box);
 
+    int shown = 0;
     for (int i = 0; i < 6; i++) {
-        char variant[64];
-        snprintf(variant, sizeof(variant), "%s%s", base, mods[i]);
+        char *variant = (i == 0) ? g_strdup(base) : skin_variant(base, mods[i]);
+        if (!variant) continue;
         GtkWidget *vb = gtk_button_new_with_label(variant);
         gtk_widget_add_css_class(vb, "flat");
         gtk_widget_add_css_class(vb, "emoji-cell");
         g_signal_connect_data(vb, "clicked", G_CALLBACK(on_skin_variant_clicked),
             g_strdup(variant), (GClosureNotify)free_closure_data, 0);
         gtk_box_append(GTK_BOX(box), vb);
+        g_free(variant);
+        shown++;
+    }
+    if (shown == 0) {
+        gtk_widget_unparent(popover);
+        return;
     }
 
     g_signal_connect(popover, "closed", G_CALLBACK(on_popover_closed), NULL);
     gtk_popover_popup(GTK_POPOVER(popover));
 }
 
+static void on_emoji_right_clicked(GtkGestureClick *gesture, int n_press, double x, double y, gpointer user_data) {
+    (void)n_press; (void)x; (void)y;
+    GtkWidget *btn = GTK_WIDGET(user_data);
+    const char *base = (const char *)g_object_get_data(G_OBJECT(btn), "base_emoji");
+    if (!base) return;
+    if (gesture) gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
+    show_variant_popover(btn, base);
+}
+
+static void on_emoji_long_pressed(GtkGestureLongPress *gesture, double x, double y, gpointer user_data) {
+    (void)gesture; (void)x; (void)y;
+    GtkWidget *btn = GTK_WIDGET(user_data);
+    const char *base = (const char *)g_object_get_data(G_OBJECT(btn), "base_emoji");
+    if (base) show_variant_popover(btn, base);
+}
+
 void super_v_ui_add_glyph_item(const char *tab, const char *glyph, const char *name, const char *keywords, int skin_tone_capable) {
-    (void)keywords;
+    (void)keywords; (void)skin_tone_capable;
     GtkWidget *flow = flow_for_tab(tab);
     if (!flow || !glyph) return;
 
-    gboolean is_emoji = (tab && strcmp(tab, "emoji") == 0);
+    /* Standalone modifiers are not emoji; they rendered as stray colour blocks. */
+    if (glyph_is_only_modifiers(glyph)) return;
 
-    GtkWidget *btn = gtk_button_new_with_label(glyph);
+    gboolean is_emoji = (tab && strcmp(tab, "emoji") == 0);
+    gboolean has_variants = is_emoji && glyph_has_tone_variants(glyph);
+
+    GtkWidget *btn = gtk_button_new();
     gtk_widget_set_tooltip_text(btn, name ? name : glyph);
     gtk_widget_add_css_class(btn, "flat");
     gtk_widget_add_css_class(btn, is_emoji ? "emoji-cell" : "symbol-cell");
     gtk_widget_set_size_request(btn, is_emoji ? EMOJI_CELL : SYMBOL_CELL, is_emoji ? EMOJI_CELL : SYMBOL_CELL);
 
+    GtkWidget *overlay = gtk_overlay_new();
+    GtkWidget *label = gtk_label_new(glyph);
+    gtk_overlay_set_child(GTK_OVERLAY(overlay), label);
+
+    if (has_variants) {
+        GtkWidget *dot = gtk_label_new("\u2022");
+        gtk_widget_add_css_class(dot, "variant-dot");
+        gtk_widget_set_halign(dot, GTK_ALIGN_CENTER);
+        gtk_widget_set_valign(dot, GTK_ALIGN_END);
+        gtk_widget_set_can_target(dot, FALSE);
+        gtk_overlay_add_overlay(GTK_OVERLAY(overlay), dot);
+    }
+
+    gtk_button_set_child(GTK_BUTTON(btn), overlay);
+
     g_signal_connect_data(btn, "clicked", G_CALLBACK(on_glyph_clicked),
         g_strdup(glyph), (GClosureNotify)free_closure_data, 0);
 
-    if (skin_tone_capable) {
+    if (has_variants) {
         g_object_set_data_full(G_OBJECT(btn), "base_emoji", g_strdup(glyph), g_free);
 
         GtkGesture *right = gtk_gesture_click_new();
@@ -566,7 +820,7 @@ void super_v_ui_add_glyph_item(const char *tab, const char *glyph, const char *n
 
         GtkGesture *longpress = gtk_gesture_long_press_new();
         gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(longpress), GTK_PHASE_CAPTURE);
-        g_signal_connect(longpress, "pressed", G_CALLBACK(on_emoji_right_clicked), btn);
+        g_signal_connect(longpress, "pressed", G_CALLBACK(on_emoji_long_pressed), btn);
         gtk_widget_add_controller(btn, GTK_EVENT_CONTROLLER(longpress));
     }
 
@@ -980,6 +1234,11 @@ void super_v_ui_show_debug(void) {
     adw_dialog_present(dialog, GTK_WIDGET(g_main_window));
 }
 
+static void on_about_row_clicked(GtkButton *btn, gpointer data) {
+    (void)btn; (void)data;
+    super_v_ui_show_about(NULL);
+}
+
 static void on_debug_clicked(GtkButton *btn, gpointer data) {
     (void)btn; (void)data;
     super_v_ui_show_debug();
@@ -1048,7 +1307,6 @@ void super_v_ui_show_about(void *parent_window) {
         { "Copyright", "\xc2\xa9 2026 Arkhi Muttaqina" },
         { "License", "GNU General Public License v3.0 or later (GPL-3.0-or-later)" },
         { "Repository", "github.com/ArkhiMuttaqina/Super-V-Clipboard" },
-        { "Written in", "Rust + C" },
     };
     for (gsize i = 0; i < G_N_ELEMENTS(app_rows); i++) {
         GtkWidget *row = adw_action_row_new();
@@ -1120,6 +1378,30 @@ void super_v_ui_show_settings(void *parent_window) {
     adw_preferences_row_set_title(ADW_PREFERENCES_ROW(sort_row), "Sort Order");
     adw_combo_row_set_model(ADW_COMBO_ROW(sort_row), G_LIST_MODEL(gtk_string_list_new(sort_options)));
     adw_preferences_group_add(sort_group, sort_row);
+
+    AdwPreferencesGroup *app_group = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
+    adw_preferences_group_set_title(app_group, "Application");
+    adw_preferences_page_add(page, app_group);
+
+    GtkWidget *about_row = adw_action_row_new();
+    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(about_row), "About Super-V Clipboard");
+    adw_action_row_set_subtitle(ADW_ACTION_ROW(about_row), "Version, author, licence, bundled libraries");
+    GtkWidget *about_btn = gtk_button_new_with_label("Open");
+    gtk_widget_add_css_class(about_btn, "flat");
+    gtk_widget_set_valign(about_btn, GTK_ALIGN_CENTER);
+    g_signal_connect(about_btn, "clicked", G_CALLBACK(on_about_row_clicked), NULL);
+    adw_action_row_add_suffix(ADW_ACTION_ROW(about_row), about_btn);
+    adw_preferences_group_add(app_group, about_row);
+
+    GtkWidget *debug_row2 = adw_action_row_new();
+    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(debug_row2), "Debug and logs");
+    adw_action_row_set_subtitle(ADW_ACTION_ROW(debug_row2), "Tail the log, copy it, open the log folder");
+    GtkWidget *debug_btn2 = gtk_button_new_with_label("Open");
+    gtk_widget_add_css_class(debug_btn2, "flat");
+    gtk_widget_set_valign(debug_btn2, GTK_ALIGN_CENTER);
+    g_signal_connect(debug_btn2, "clicked", G_CALLBACK(on_debug_clicked), NULL);
+    adw_action_row_add_suffix(ADW_ACTION_ROW(debug_row2), debug_btn2);
+    adw_preferences_group_add(app_group, debug_row2);
 
     AdwPreferencesGroup *win_group = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
     adw_preferences_group_set_title(win_group, "Window");
@@ -1303,6 +1585,7 @@ static gboolean on_toggle_signal(gpointer data) {
     gtk_window_present(GTK_WINDOW(g_main_window));
     g_timeout_add(60, place_after_map, NULL);
     gtk_widget_grab_focus(g_search_entry);
+    refresh_bridge_status();
     g_timeout_add(200, sync_clipboard_idle, NULL);
     return G_SOURCE_CONTINUE;
 }
@@ -1496,6 +1779,34 @@ static void on_move_window_reply(GObject *source, GAsyncResult *res, gpointer da
     }
 }
 
+static void refresh_bridge_status(void) {
+    if (!g_bridge_banner) return;
+    GError *err = NULL;
+    GDBusConnection *bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, &err);
+    if (!bus) {
+        if (err) g_error_free(err);
+        gtk_widget_set_visible(g_bridge_banner, TRUE);
+        return;
+    }
+    GVariant *reply = g_dbus_connection_call_sync(bus,
+        "org.freedesktop.DBus", "/org/freedesktop/DBus",
+        "org.freedesktop.DBus", "NameHasOwner",
+        g_variant_new("(s)", "my.id.arkhimuttaqina.Bridge"),
+        G_VARIANT_TYPE("(b)"), G_DBUS_CALL_FLAGS_NONE, 300, NULL, &err);
+    gboolean present = FALSE;
+    if (reply) {
+        gboolean owned = FALSE;
+        g_variant_get(reply, "(b)", &owned);
+        present = owned;
+        g_variant_unref(reply);
+    } else if (err) {
+        g_error_free(err);
+    }
+    gtk_widget_set_visible(g_bridge_banner, !present);
+    if (g_getenv("SUPER_V_DEBUG_INSERT")) g_printerr("BRIDGE present=%d\n", present);
+    g_object_unref(bus);
+}
+
 static void request_pointer_placement(void) {
     if (!g_placement_pointer || !g_main_window) return;
     GError *err = NULL;
@@ -1576,16 +1887,6 @@ static GtkWidget *create_main_window(AdwApplication *app) {
     g_signal_connect(settings_btn, "clicked", G_CALLBACK(on_settings_clicked), window);
     adw_header_bar_pack_end(ADW_HEADER_BAR(top_header), settings_btn);
 
-    GMenu *menu = g_menu_new();
-    g_menu_append(menu, "Preferences", "app.preferences");
-    g_menu_append(menu, "About Super-V Clipboard", "app.about");
-    GtkWidget *menu_btn = gtk_menu_button_new();
-    gtk_menu_button_set_icon_name(GTK_MENU_BUTTON(menu_btn), "open-menu-symbolic");
-    gtk_menu_button_set_menu_model(GTK_MENU_BUTTON(menu_btn), G_MENU_MODEL(menu));
-    gtk_widget_add_css_class(menu_btn, "flat");
-    gtk_widget_set_tooltip_text(menu_btn, "Menu");
-    adw_header_bar_pack_end(ADW_HEADER_BAR(top_header), menu_btn);
-
     GtkWidget *close_btn = gtk_button_new_from_icon_name("window-close-symbolic");
     gtk_widget_set_tooltip_text(close_btn, "Close (Esc)");
     gtk_widget_add_css_class(close_btn, "flat");
@@ -1604,19 +1905,40 @@ static GtkWidget *create_main_window(AdwApplication *app) {
     g_signal_connect(g_search_entry, "search-changed", G_CALLBACK(on_search_changed), NULL);
     gtk_box_append(GTK_BOX(main_box), g_search_entry);
 
+    /* Bridge status: paste and capture need the GNOME extension. */
+    g_bridge_banner = gtk_label_new("GNOME extension Super-V Bridge is not installed or not connected — pasting and clipboard capture are limited.\nInstall it and log in again, or run super-v-ui --check.");
+    gtk_label_set_wrap(GTK_LABEL(g_bridge_banner), TRUE);
+    gtk_widget_set_margin_start(g_bridge_banner, 12);
+    gtk_widget_set_margin_end(g_bridge_banner, 12);
+    gtk_widget_set_margin_bottom(g_bridge_banner, 8);
+    gtk_widget_add_css_class(g_bridge_banner, "warning-banner");
+    gtk_widget_set_halign(g_bridge_banner, GTK_ALIGN_FILL);
+    gtk_widget_set_visible(g_bridge_banner, FALSE);
+    gtk_box_append(GTK_BOX(main_box), g_bridge_banner);
+
     gtk_box_append(GTK_BOX(main_box), g_stack);
 
     /* TAB 1: clipboard history */
     GtkWidget *clip_scroll = gtk_scrolled_window_new();
     g_clip_list = gtk_list_box_new();
     gtk_list_box_set_selection_mode(GTK_LIST_BOX(g_clip_list), GTK_SELECTION_SINGLE);
+    gtk_list_box_set_header_func(GTK_LIST_BOX(g_clip_list), history_header_func, NULL, NULL);
     gtk_list_box_set_filter_func(GTK_LIST_BOX(g_clip_list), (GtkListBoxFilterFunc)filter_clip_row, NULL, NULL);
     gtk_widget_add_css_class(g_clip_list, "boxed-list");
     gtk_widget_set_margin_start(g_clip_list, 10);
     gtk_widget_set_margin_end(g_clip_list, 10);
     gtk_widget_set_margin_bottom(g_clip_list, 10);
+    g_empty_label = gtk_label_new("Nobody here. Start copying something, lmao.");
+    gtk_widget_add_css_class(g_empty_label, "dim-label");
+    gtk_widget_set_halign(g_empty_label, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(g_empty_label, GTK_ALIGN_CENTER);
+    gtk_widget_set_vexpand(g_empty_label, TRUE);
+
+    GtkWidget *clip_page = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_box_append(GTK_BOX(clip_page), clip_scroll);
+    gtk_box_append(GTK_BOX(clip_page), g_empty_label);
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(clip_scroll), g_clip_list);
-    adw_view_stack_add_titled_with_icon(ADW_VIEW_STACK(g_stack), clip_scroll, "clipboard", "Clipboard", "edit-paste-symbolic");
+    adw_view_stack_add_titled_with_icon(ADW_VIEW_STACK(g_stack), clip_page, "clipboard", "Clipboard", "edit-paste-symbolic");
 
     /* TAB 2: emoji */
     GtkWidget *emoji_scroll = gtk_scrolled_window_new();
@@ -1715,6 +2037,7 @@ static void on_app_activate(GtkApplication *app, gpointer user_data) {
     gtk_window_present(GTK_WINDOW(g_main_window));
     g_timeout_add(60, place_after_map, NULL);
     gtk_widget_grab_focus(g_search_entry);
+    refresh_bridge_status();
     g_timeout_add(200, sync_clipboard_idle, NULL);
 
     if (g_activate_hook) g_activate_hook();
