@@ -255,53 +255,67 @@ static gboolean path_is_gif(const char *path, const char *mime) {
 /* Builds the clipboard payload for one image path: animated bytes when it is a
  * GIF, a texture for clients that only take pictures, and a file list for
  * clients that want the file itself. */
+static const char *mime_for_path(const char *path) {
+    const char *dot = strrchr(path, '.');
+    if (dot) {
+        if (!strcasecmp(dot, ".gif")) return "image/gif";
+        if (!strcasecmp(dot, ".jpg") || !strcasecmp(dot, ".jpeg")) return "image/jpeg";
+        if (!strcasecmp(dot, ".webp")) return "image/webp";
+        if (!strcasecmp(dot, ".bmp")) return "image/bmp";
+    }
+    return "image/png";
+}
+
+/* Two byte providers, never a GValue one: a typed texture advertises no formats
+ * in this GTK build, so a union with it silently collapsed to png only and a
+ * picked GIF reached the clipboard as a still picture. Raw bytes keep the
+ * animation for clients that ask for image/gif; the encoded frame keeps every
+ * other client working. */
 static GdkContentProvider *image_content_provider(const char *path, const char *mime,
                                                   gboolean *had_texture, gboolean *had_gif) {
     if (!path || !*path) return NULL;
-    GdkTexture *texture = texture_for_image(path);
     gboolean is_gif = path_is_gif(path, mime);
-    if (had_texture) *had_texture = texture != NULL;
+    if (had_texture) *had_texture = FALSE;
     if (had_gif) *had_gif = FALSE;
 
     GdkContentProvider *providers[2];
     int n = 0;
-    gchar *data = NULL;
-    gsize len = 0;
-    if (is_gif && g_file_get_contents(path, &data, &len, NULL) && len > 0) {
+
+    gchar *raw = NULL;
+    gsize raw_len = 0;
+    if (g_file_get_contents(path, &raw, &raw_len, NULL) && raw_len > 0) {
+        const char *raw_mime = is_gif ? "image/gif" : mime_for_path(path);
+        if (g_getenv("SUPER_V_DUMP_CLIP")) {
+            const char *ext = is_gif ? "gif" : "bin";
+            char dump[128];
+            g_snprintf(dump, sizeof(dump), "/tmp/handed.%s", ext);
+            g_file_set_contents(dump, raw, (gssize)raw_len, NULL);
+        }
         providers[n++] = gdk_content_provider_new_for_bytes(
-            "image/gif", g_bytes_new_take(data, len));
-        if (had_gif) *had_gif = TRUE;
+            raw_mime, g_bytes_new_take(raw, raw_len));
+        if (is_gif && had_gif) *had_gif = TRUE;
     } else {
-        g_free(data);
-    }
-    if (texture) {
-        providers[n++] = gdk_content_provider_new_typed(GDK_TYPE_TEXTURE, texture);
-    }
-    {
-    /* GdkFileList has no serializer in this GTK build: adding it makes
-     * gdk_content_provider_ref_formats fail and the clipboard write is
-     * rejected outright, so only byte and texture providers are used. */
-
+        g_free(raw);
     }
 
-    if (g_getenv("SUPER_V_DEBUG_CLIPBOARD")) {
-        for (int i = 0; i < n; i++)
-                        g_printerr("PROV[%d] valid=%d gtype=%s\n", i,
-                GDK_IS_CONTENT_PROVIDER(providers[i]),
-                G_OBJECT_TYPE_NAME(providers[i]));
+    GdkPixbuf *pixbuf = gdk_pixbuf_new_from_file(path, NULL);
+    if (pixbuf) {
+        gchar *png = NULL;
+        gsize png_len = 0;
+        if (gdk_pixbuf_save_to_bufferv(pixbuf, &png, &png_len, "png", NULL, NULL, NULL)) {
+            providers[n++] = gdk_content_provider_new_for_bytes(
+                "image/png", g_bytes_new_take(png, png_len));
+            if (had_texture) *had_texture = TRUE;
+        }
+        g_object_unref(pixbuf);
     }
 
     GdkContentProvider *all = NULL;
     if (n == 1) {
         all = providers[0];
     } else if (n > 1) {
-        /* The union takes ownership of the members: unreferencing them here
-         * left dangling providers inside the union and set_content crashed. */
-        all = gdk_content_provider_new_union(providers, n);
-        providers[0] = NULL;
-        providers[1] = NULL;
+        all = gdk_content_provider_new_union(providers, n);   /* takes ownership */
     }
-    if (texture) g_object_unref(texture);
     return all;
 }
 
@@ -312,6 +326,14 @@ void super_v_ui_set_gif_clipboard(const char *path) {
     if (!provider) return;
     mark_self_clipboard();
     gdk_clipboard_set_content(gdk_display_get_clipboard(d), provider);
+    if (g_getenv("SUPER_V_DEBUG_CLIPBOARD")) {
+        GdkContentFormats *f = gdk_clipboard_get_formats(gdk_display_get_clipboard(d));
+        gsize m = 0;
+        const char * const *mt = f ? gdk_content_formats_get_mime_types(f, &m) : NULL;
+        g_printerr("CLIPOFFER %zu:", m);
+        for (gsize i = 0; i < m; i++) g_printerr(" %s", mt[i]);
+        g_printerr("\n");
+    }
     g_object_unref(provider);
 }
 
@@ -2944,8 +2966,9 @@ static void on_app_activate(GtkApplication *app, gpointer user_data) {
         adw_view_stack_set_visible_child_name(ADW_VIEW_STACK(g_stack), start_tab);
 
     if (g_getenv("SUPER_V_GIF_CLIP")) {
+        /* keep the window mapped: Wayland only lets a focused client own
+         * the clipboard, so hiding would drop the offer immediately. */
         super_v_ui_set_gif_clipboard(g_getenv("SUPER_V_GIF_CLIP"));
-        gtk_widget_set_visible(g_main_window, FALSE);
     }
     if (g_getenv("SUPER_V_SELFTEST_IMAGE_PASTE")) {
         printf("VERIFY: image_paste_path=true\n");
