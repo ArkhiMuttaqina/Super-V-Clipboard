@@ -246,19 +246,16 @@ static gboolean path_is_gif(const char *path, const char *mime) {
  * file itself (image/gif) unioned with a first-frame PNG: chat clients that
  * understand image/gif show the animation (WhatsApp/Telegram web), and clients
  * that only take textures still paste something. */
-static void paste_file_after_hide(const char *path, const char *mime) {
-    if (!path || !*path) return;
+/* Builds the clipboard payload for one image path: animated bytes when it is a
+ * GIF, a texture for clients that only take pictures, and a file list for
+ * clients that want the file itself. */
+static GdkContentProvider *image_content_provider(const char *path, const char *mime,
+                                                  gboolean *had_texture, gboolean *had_gif) {
+    if (!path || !*path) return NULL;
     GdkTexture *texture = texture_for_image(path);
     gboolean is_gif = path_is_gif(path, mime);
-    g_last_paste_had_texture = texture != NULL;
-    g_last_paste_had_gif = FALSE;
-
-    GdkDisplay *d = gdk_display_get_default();
-    if (!d) {
-        if (texture) g_object_unref(texture);
-        return;
-    }
-    GdkClipboard *cb = gdk_display_get_clipboard(d);
+    if (had_texture) *had_texture = texture != NULL;
+    if (had_gif) *had_gif = FALSE;
 
     GdkContentProvider *providers[3];
     int n = 0;
@@ -267,36 +264,59 @@ static void paste_file_after_hide(const char *path, const char *mime) {
     if (is_gif && g_file_get_contents(path, &data, &len, NULL) && len > 0) {
         providers[n++] = gdk_content_provider_new_for_bytes(
             "image/gif", g_bytes_new_take(data, len));
-        g_last_paste_had_gif = TRUE;
+        if (had_gif) *had_gif = TRUE;
     } else {
         g_free(data);
     }
     if (texture) {
         providers[n++] = gdk_content_provider_new_typed(GDK_TYPE_TEXTURE, texture);
     }
-    /* Third shape: the file itself. Mail clients, chat apps and file managers
-     * take a file list, browsers take image/gif bytes, editors take the texture. */
     {
         GFile *file = g_file_new_for_path(path);
         if (file) {
             GSList *list = g_slist_append(NULL, file);
             GdkFileList *file_list = gdk_file_list_new_from_list(list);
-            if (file_list) {
+            if (file_list)
                 providers[n++] = gdk_content_provider_new_typed(GDK_TYPE_FILE_LIST, file_list);
-            }
         }
     }
 
-    if (n > 0) {
-        GdkContentProvider *all = (n == 1) ? providers[0]
-            : gdk_content_provider_new_union(providers, n);
-        gdk_clipboard_set_content(cb, all);
-        if (n > 1) g_object_unref(all);
+    GdkContentProvider *all = NULL;
+    if (n == 1) {
+        all = providers[0];
+    } else if (n > 1) {
+        all = gdk_content_provider_new_union(providers, n);
         for (int i = 0; i < n; i++) g_object_unref(providers[i]);
-        hide_main_window();
-        g_timeout_add(90, do_paste_action, g_new0(PasteAction, 1));
     }
     if (texture) g_object_unref(texture);
+    return all;
+}
+
+void super_v_ui_set_gif_clipboard(const char *path) {
+    GdkDisplay *d = gdk_display_get_default();
+    if (!d) return;
+    GdkContentProvider *provider = image_content_provider(path, "image/gif", NULL, NULL);
+    if (!provider) return;
+    gdk_clipboard_set_content(gdk_display_get_clipboard(d), provider);
+    g_object_unref(provider);
+}
+
+static void paste_file_after_hide(const char *path, const char *mime) {
+    gboolean had_texture = FALSE, had_gif = FALSE;
+    GdkContentProvider *all = image_content_provider(path, mime, &had_texture, &had_gif);
+    g_last_paste_had_texture = had_texture;
+    g_last_paste_had_gif = had_gif;
+    if (!all) return;
+
+    GdkDisplay *d = gdk_display_get_default();
+    if (!d) {
+        g_object_unref(all);
+        return;
+    }
+    gdk_clipboard_set_content(gdk_display_get_clipboard(d), all);
+    g_object_unref(all);
+    hide_main_window();
+    g_timeout_add(90, do_paste_action, g_new0(PasteAction, 1));
 }
 
 static void paste_image_after_hide(const char *path) {
@@ -2286,7 +2306,14 @@ static gboolean g_application_quit_wrapper(gpointer data) {
 static gboolean selftest_activate_row(gpointer data) {
     (void)data;
     GtkListBoxRow *first = NULL;
-    if (g_clip_list) first = gtk_list_box_get_row_at_index(GTK_LIST_BOX(g_clip_list), 0);
+    if (g_clip_list) {
+        for (GtkWidget *w = gtk_widget_get_first_child(g_clip_list); w;
+             w = gtk_widget_get_next_sibling(w)) {
+            if (g_object_get_data(G_OBJECT(w), "super_v_section")) continue;
+            first = GTK_LIST_BOX_ROW(w);
+            break;
+        }
+    }
     if (first) {
         g_signal_emit_by_name(first, "activated");
         printf("VERIFY: row_activated=true\n");
@@ -2847,6 +2874,10 @@ static void on_app_activate(GtkApplication *app, gpointer user_data) {
     if (start_tab && g_stack)
         adw_view_stack_set_visible_child_name(ADW_VIEW_STACK(g_stack), start_tab);
 
+    if (g_getenv("SUPER_V_GIF_CLIP")) {
+        super_v_ui_set_gif_clipboard(g_getenv("SUPER_V_GIF_CLIP"));
+        gtk_widget_set_visible(g_main_window, FALSE);
+    }
     if (g_getenv("SUPER_V_SNAPSHOT")) {
         g_timeout_add(1200, take_snapshot, g_strdup(g_getenv("SUPER_V_SNAPSHOT")));
     }
