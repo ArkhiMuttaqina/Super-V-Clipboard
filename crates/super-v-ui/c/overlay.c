@@ -2006,7 +2006,7 @@ static GtkWidget *make_thumb(const char *path, int size) {
  * then only picks the frame whose time has come, so the main thread never
  * decodes anything. */
 
-#define GIF_MAX_FRAMES 120
+#define GIF_MAX_FRAMES 48
 
 typedef struct {
     GdkPixbuf **frames;
@@ -2051,11 +2051,43 @@ static void gif_clip_free(gpointer data) {
     g_free(c);
 }
 
+static void on_gif_size_prepared(GdkPixbufLoader *loader, int width, int height,
+                                 gpointer data) {
+    int target = GPOINTER_TO_INT(data);
+    if (width <= target && height <= target) return;
+    double scale = MIN((double)target / (double)width, (double)target / (double)height);
+    int w = MAX(1, (int)(width * scale));
+    int h = MAX(1, (int)(height * scale));
+    gdk_pixbuf_loader_set_size(loader, w, h);
+}
+
+/* Decode straight to thumbnail size: scaling after a full-size decode cost 50 to
+ * 220 ms per GIF, and a page of 24 starved the UI thread for seconds. */
 static GifClip *gif_clip_decode(const char *path, int size) {
     GError *err = NULL;
-    GdkPixbufAnimation *anim = gdk_pixbuf_animation_new_from_file(path, &err);
-    if (!anim) {
+    GdkPixbufLoader *loader = gdk_pixbuf_loader_new();
+    g_signal_connect(loader, "size-prepared", G_CALLBACK(on_gif_size_prepared),
+                     GINT_TO_POINTER(size));
+
+    gchar *data = NULL;
+    gsize len = 0;
+    if (!g_file_get_contents(path, &data, &len, NULL) || len == 0) {
+        g_free(data);
+        g_object_unref(loader);
+        return NULL;
+    }
+    gboolean ok = gdk_pixbuf_loader_write(loader, (const guchar *)data, len, &err);
+    g_free(data);
+    if (ok) ok = gdk_pixbuf_loader_close(loader, &err);
+    if (!ok) {
         if (err) g_error_free(err);
+        g_object_unref(loader);
+        return NULL;
+    }
+
+    GdkPixbufAnimation *anim = gdk_pixbuf_loader_get_animation(loader);
+    if (!anim) {
+        g_object_unref(loader);
         return NULL;
     }
 
@@ -2074,19 +2106,19 @@ static GifClip *gif_clip_decode(const char *path, int size) {
         if (delay > 1000) delay = 1000;
 
         GdkPixbuf *fit = fit_pixbuf(frame, size);
-        if (fit) {
-            clip->frames[clip->n] = fit;
-            clip->delays[clip->n] = (guint)delay;
-            clip->total_ms += delay;
-            clip->n++;
-        }
+        if (!fit) break;
+        clip->frames[clip->n] = fit;
+        clip->delays[clip->n] = (guint)delay;
+        clip->total_ms += delay;
+        clip->n++;
+
         base.tv_usec += delay * 1000;
         base.tv_sec += base.tv_usec / 1000000;
         base.tv_usec %= 1000000;
         gdk_pixbuf_animation_iter_advance(iter, &base);
         if (gdk_pixbuf_animation_is_static_image(anim)) break;
     }
-    g_object_unref(anim);
+    g_object_unref(loader);
 
     if (clip->n == 0) {
         gif_clip_free(clip);
@@ -2095,11 +2127,27 @@ static GifClip *gif_clip_decode(const char *path, int size) {
     return clip;
 }
 
+
 static void deliver_clip(gpointer data);
 
+/* Decoding every GIF of a page at once starves the compositor and the window
+ * stops answering; three at a time keeps the grid filling without stalls. */
+static GMutex g_clip_gate;
+static GCond g_clip_cond;
+static int g_clip_active = 0;
 static gpointer gif_clip_thread(gpointer data) {
+    g_mutex_lock(&g_clip_gate);
+    while (g_clip_active >= 3) g_cond_wait(&g_clip_cond, &g_clip_gate);
+    g_clip_active++;
+    g_mutex_unlock(&g_clip_gate);
+
     ClipReady *job = data;
     GifClip *clip = gif_clip_decode(job->path, job->size);
+    g_mutex_lock(&g_clip_gate);
+    g_clip_active--;
+    g_cond_signal(&g_clip_cond);
+    g_mutex_unlock(&g_clip_gate);
+
     ClipReady *ready = g_new0(ClipReady, 1);
     ready->path = g_strdup(job->path);
     ready->clip = clip;
@@ -2277,18 +2325,9 @@ static gboolean gif_frame_tick(GtkWidget *widget, GdkFrameClock *clock, gpointer
 }
 
 static GtkWidget *make_gif_thumb(const char *path, int size) {
-    GdkPixbuf *still = NULL;
-    GError *err = NULL;
-    GdkPixbufAnimation *anim = gdk_pixbuf_animation_new_from_file(path, &err);
-    if (anim) {
-        still = gdk_pixbuf_animation_get_static_image(anim);
-        if (still) g_object_ref(still);
-        g_object_unref(anim);
-    } else if (err) {
-        g_error_free(err);
-    }
-    if (!still) still = gdk_pixbuf_new_from_file(path, NULL);
-
+    /* No decoding here: gdk_pixbuf_animation_new_from_file takes 50-220 ms per
+     * GIF on the GTK thread, so a page of 24 froze the window for seconds.
+     * The decode already runs in gif_clip_thread and lands via deliver_clip. */
     GtkWidget *img = gtk_drawing_area_new();
     gtk_widget_set_size_request(img, size, size);
     gtk_widget_set_halign(img, GTK_ALIGN_CENTER);
@@ -2298,17 +2337,12 @@ static GtkWidget *make_gif_thumb(const char *path, int size) {
     cell->path = g_strdup(path);
     cell->size = size;
     cell->img = img;
-    if (still) {
-        cell->current = still;
-    } else {
-        gtk_widget_set_size_request(img, size, size);
-    }
     gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(img), gif_cell_draw, cell, NULL);
     g_object_set_data_full(G_OBJECT(img), "gif-cell", cell, gif_cell_free);
-    /* Kick the decode now so the first playback tick already has frames. */
     cell->clip = gif_clip_get(path, size);
     return img;
 }
+
 
 static gboolean on_window_key_pressed(GtkEventControllerKey *ctrl, guint keyval, guint keycode, GdkModifierType state, gpointer user_data) {
     (void)ctrl; (void)keycode; (void)state; (void)user_data;
