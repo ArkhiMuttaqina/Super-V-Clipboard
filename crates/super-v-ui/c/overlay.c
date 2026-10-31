@@ -27,6 +27,23 @@ static GtkWidget *g_recent_emoji_flow = NULL;
 static GtkWidget *g_symbol_flow = NULL;
 static GtkWidget *g_gif_flow = NULL;
 static GtkWidget *g_gif_label = NULL;
+static GtkWidget *g_ai_prompt;
+static GtkWidget *g_snippet_list_node;
+static GtkWidget *g_snippet_list;
+static GtkWidget *g_ai_provider_combo;
+static GtkWidget *g_ai_model_row;
+static GtkWidget *g_ai_key_row;
+static GtkWidget *g_ai_base_row;
+static void on_ai_config_changed(GObject *obj, GParamSpec *pspec, gpointer data);
+static void on_ai_provider_selected(GObject *obj, GParamSpec *pspec, gpointer data);
+static char *g_ai_cfg_provider;
+static char *g_ai_cfg_model;
+static char *g_ai_cfg_key;
+static char *g_ai_cfg_base;
+static void apply_ai_config_to_rows(void);
+static const char *dropdown_text(GtkWidget *dd);
+static guint ai_index_for(const char *provider);
+
 static gboolean g_skip_change = FALSE;
 static guint g_restore_source = 0;
 static char *g_saved_clip = NULL;
@@ -1174,6 +1191,11 @@ static void on_tab_switched(GObject *obj, GParamSpec *pspec, gpointer user_data)
 
     apply_entry_text(saved_query_for(name));
 
+    if (strcmp(name, "ai") == 0) {
+        if (g_ai_prompt) gtk_widget_grab_focus(g_ai_prompt);
+    } else if (strcmp(name, "snippets") == 0) {
+        if (g_snippet_list) gtk_widget_grab_focus(g_snippet_list);
+    }
     if (strcmp(name, "clipboard") == 0) {
         gtk_list_box_invalidate_filter(GTK_LIST_BOX(g_clip_list));
         gtk_widget_grab_focus(g_search_entry);
@@ -1749,53 +1771,43 @@ void super_v_ui_show_settings(void *parent_window) {
     adw_combo_row_set_model(ADW_COMBO_ROW(style_row), G_LIST_MODEL(gtk_string_list_new(styles)));
     adw_preferences_group_add(style_group, style_row);
 
-    /* ---- GIF ---- */
-    AdwPreferencesPage *gif_page = ADW_PREFERENCES_PAGE(adw_preferences_page_new());
-    adw_preferences_page_set_title(gif_page, "GIF and Media");
-    adw_preferences_page_set_icon_name(gif_page, "media-optical-symbolic");
-    adw_preferences_dialog_add(ADW_PREFERENCES_DIALOG(dialog), gif_page);
+    /* ---- AI ---- */
+    AdwPreferencesPage *ai_page = ADW_PREFERENCES_PAGE(adw_preferences_page_new());
+    adw_preferences_page_set_title(ai_page, "Writing assistant");
+    adw_preferences_page_set_icon_name(ai_page, "x-office-document-symbolic");
+    adw_preferences_dialog_add(ADW_PREFERENCES_DIALOG(dialog), ai_page);
 
-    AdwPreferencesGroup *gif_group = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
-    adw_preferences_group_set_title(gif_group, "GIF Provider");
-    adw_preferences_group_set_description(gif_group,
-        "Local works offline. Tenor/Giphy need an API key from their developer portal. "
-        "Want another provider? Send a PR upstream: github.com/ArkhiMuttaqina/Super-V-Clipboard");
-    adw_preferences_page_add(gif_page, gif_group);
+    AdwPreferencesGroup *ai_group = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
+    adw_preferences_group_set_title(ai_group, "Provider");
+    adw_preferences_group_set_description(ai_group,
+        "Auto uses an API key when one is set, otherwise a local CLI (claude, codex, antigravity).");
+    adw_preferences_page_add(ai_page, ai_group);
 
-    const char *providers[] = { "Local library (~/Pictures, ~/Downloads)", "Tenor API", "Giphy", NULL };
-    g_gif_combo = adw_combo_row_new();
-    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(g_gif_combo), "Active provider");
-    adw_combo_row_set_model(ADW_COMBO_ROW(g_gif_combo), G_LIST_MODEL(gtk_string_list_new(providers)));
-    select_combo(g_gif_combo, (guint)gif_index_for(g_gif_provider));
-    g_signal_connect(g_gif_combo, "notify::selected", G_CALLBACK(on_gif_provider_changed), NULL);
-    adw_preferences_group_add(gif_group, g_gif_combo);
+    const char *ai_providers[] = {
+        "Auto detect", "Anthropic API", "OpenAI compatible API", "claude CLI", "codex CLI", "antigravity CLI", NULL
+    };
+    g_ai_provider_combo = adw_combo_row_new();
+    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(g_ai_provider_combo), "Active provider");
+    adw_combo_row_set_model(ADW_COMBO_ROW(g_ai_provider_combo), G_LIST_MODEL(gtk_string_list_new(ai_providers)));
+    select_combo(g_ai_provider_combo, 0);
+    g_signal_connect(g_ai_provider_combo, "notify::selected", G_CALLBACK(on_ai_provider_selected), NULL);
+    adw_preferences_group_add(ai_group, g_ai_provider_combo);
 
-    g_api_key_row = adw_entry_row_new();
-    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(g_api_key_row), "API key (Tenor / Giphy)");
-    gtk_editable_set_text(GTK_EDITABLE(g_api_key_row), g_api_key_provider_value());
-    g_signal_connect(g_api_key_row, "changed", G_CALLBACK(on_api_key_changed), NULL);
-    adw_preferences_group_add(gif_group, g_api_key_row);
+    g_ai_model_row = adw_entry_row_new();
+    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(g_ai_model_row), "Model (e.g. claude-sonnet-4-5, gpt-4o-mini)");
+    g_signal_connect(g_ai_model_row, "changed", G_CALLBACK(on_ai_config_changed), NULL);
+    adw_preferences_group_add(ai_group, g_ai_model_row);
 
-    g_provider_test_row = adw_action_row_new();
-    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(g_provider_test_row), "Test provider");
-    adw_action_row_set_subtitle(ADW_ACTION_ROW(g_provider_test_row),
-        "Runs a quick smoke test with the key above and reports what came back");
-    GtkWidget *test_btn = gtk_button_new_with_label("Test");
-    gtk_widget_add_css_class(test_btn, "flat");
-    gtk_widget_set_valign(test_btn, GTK_ALIGN_CENTER);
-    g_signal_connect(test_btn, "clicked", G_CALLBACK(on_test_provider), NULL);
-    adw_action_row_add_suffix(ADW_ACTION_ROW(g_provider_test_row), test_btn);
-    adw_preferences_group_add(gif_group, g_provider_test_row);
+    g_ai_key_row = adw_entry_row_new();
+    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(g_ai_key_row), "API key (sk-ant-... or sk-...)");
+    g_signal_connect(g_ai_key_row, "changed", G_CALLBACK(on_ai_config_changed), NULL);
+    adw_preferences_group_add(ai_group, g_ai_key_row);
 
-    GtkWidget *rescan_row = adw_action_row_new();
-    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(rescan_row), "Rescan local GIFs");
-    adw_action_row_set_subtitle(ADW_ACTION_ROW(rescan_row), "Re-index animated images found on disk.");
-    GtkWidget *rescan_btn = gtk_button_new_with_label("Rescan");
-    gtk_widget_add_css_class(rescan_btn, "flat");
-    gtk_widget_set_valign(rescan_btn, GTK_ALIGN_CENTER);
-    g_signal_connect(rescan_btn, "clicked", G_CALLBACK(on_rescan_gifs), NULL);
-    adw_action_row_add_suffix(ADW_ACTION_ROW(rescan_row), rescan_btn);
-    adw_preferences_group_add(gif_group, rescan_row);
+    g_ai_base_row = adw_entry_row_new();
+    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(g_ai_base_row), "Base URL (optional, e.g. https://api.openai.com/v1)");
+    g_signal_connect(g_ai_base_row, "changed", G_CALLBACK(on_ai_config_changed), NULL);
+    adw_preferences_group_add(ai_group, g_ai_base_row);
+    apply_ai_config_to_rows();
 
     track_dialog(dialog);
     adw_dialog_present(dialog, GTK_WIDGET(g_main_window));
@@ -2815,11 +2827,22 @@ static GtkWidget *g_ai_presets = NULL;
 static SnippetAddHook g_snippet_add_hook = NULL;
 static SnippetDeleteHook g_snippet_delete_hook = NULL;
 static AiGenerateHook g_ai_generate_hook = NULL;
+static AiConfigHook g_ai_config_hook = NULL;
+static guint g_ai_provider_index = 0;
+static guint ai_index_for(const char *provider) {
+    if (!provider) return 0;
+    if (!strcmp(provider, "anthropic")) return 1;
+    if (!strcmp(provider, "openai")) return 2;
+    if (!strcmp(provider, "claude-cli")) return 3;
+    if (!strcmp(provider, "codex-cli")) return 4;
+    if (!strcmp(provider, "antigravity")) return 5;
+    return 0;
+}
 
 static const char *g_ai_language_options[] = { "Auto", "Indonesia", "English", NULL };
-static const char *g_ai_tone_options[] = { "Sopan", "Santai", "Netral", "Formal", NULL };
-static const char *g_ai_format_options[] = { "Auto", "Markdown", "Teks biasa", NULL };
-static const char *g_ai_target_options[] = { "Auto", "Chat (WA/TG)", "Dokumen", "Email", NULL };
+static const char *g_ai_tone_options[] = { "Polite", "Casual", "Neutral", "Formal", NULL };
+static const char *g_ai_format_options[] = { "Auto", "Markdown", "Plain text", NULL };
+static const char *g_ai_target_options[] = { "Auto", "Chat (WhatsApp/Telegram)", "Document", "Email", NULL };
 
 void super_v_ui_set_snippet_hooks(SnippetAddHook add, SnippetDeleteHook del) {
     g_snippet_add_hook = add;
@@ -2891,7 +2914,7 @@ static void on_snippet_add_clicked(GtkButton *btn, gpointer data) {
     (void)btn; (void)data;
     if (!g_main_window) return;
     AdwDialog *dlg = adw_dialog_new();
-    adw_dialog_set_title(dlg, "Snippet baru");
+    adw_dialog_set_title(dlg, "New snippet");
 
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
     gtk_widget_set_margin_start(box, 16);
@@ -2900,7 +2923,7 @@ static void on_snippet_add_clicked(GtkButton *btn, gpointer data) {
     gtk_widget_set_margin_bottom(box, 12);
 
     GtkWidget *name = gtk_entry_new();
-    gtk_entry_set_placeholder_text(GTK_ENTRY(name), "Judul snippet");
+    gtk_entry_set_placeholder_text(GTK_ENTRY(name), "Snippet title");
     gtk_box_append(GTK_BOX(box), name);
 
     GtkWidget *body = gtk_text_view_new();
@@ -2913,8 +2936,8 @@ static void on_snippet_add_clicked(GtkButton *btn, gpointer data) {
 
     GtkWidget *actions = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
     gtk_widget_set_halign(actions, GTK_ALIGN_END);
-    GtkWidget *cancel = gtk_button_new_with_label("Batal");
-    GtkWidget *save = gtk_button_new_with_label("Simpan");
+    GtkWidget *cancel = gtk_button_new_with_label("Cancel");
+    GtkWidget *save = gtk_button_new_with_label("Save");
     gtk_widget_add_css_class(save, "suggested-action");
     g_signal_connect_swapped(cancel, "clicked", G_CALLBACK(adw_dialog_close), dlg);
     SnippetDialog *state = g_new0(SnippetDialog, 1);
@@ -2931,6 +2954,24 @@ static void on_snippet_add_clicked(GtkButton *btn, gpointer data) {
 }
 
 static char *ai_result_text(void);
+void super_v_ui_show_settings(void *parent_window);
+
+static gboolean ai_config_test(gpointer data) {
+    (void)data;
+    super_v_ui_show_settings(g_main_window);
+    super_v_ui_set_ai_config_values("openai", "mock-model", "test-key", "http://127.0.0.1:8899/v1");
+    on_ai_config_changed(NULL, NULL, NULL);
+    printf("VERIFY: ai_config_applied=true\n");
+    fflush(stdout);
+    return G_SOURCE_REMOVE;
+}
+
+static gboolean open_preferences_for_test(gpointer data) {
+    (void)data;
+    super_v_ui_show_settings(g_main_window);
+    return G_SOURCE_REMOVE;
+}
+
 static gboolean ai_test_run(gpointer data) {
     (void)data;
     const char *prompt = g_getenv("SUPER_V_SELFTEST_AI");
@@ -2977,6 +3018,52 @@ static char *ai_result_text(void) {
     return gtk_text_buffer_get_text(buf, &s, &e, FALSE);
 }
 
+static void on_ai_provider_selected(GObject *obj, GParamSpec *pspec, gpointer data) {
+    (void)obj; (void)pspec; (void)data;
+    if (!g_ai_provider_combo) return;
+    if (g_setting_combo) return;   /* programmatic set: keep the callers value */
+    g_ai_provider_index = gtk_drop_down_get_selected(GTK_DROP_DOWN(g_ai_provider_combo));
+    on_ai_config_changed(NULL, NULL, NULL);
+}
+
+static void apply_ai_config_to_rows(void) {
+    if (!g_ai_provider_combo) return;
+    g_setting_combo = TRUE;
+    if (g_getenv("SUPER_V_SELFTEST_AI_CONFIG")) g_printerr("APPLYDBG value=%s idx=%u" "\n", g_ai_cfg_provider ? g_ai_cfg_provider : "(null)", ai_index_for(g_ai_cfg_provider));
+    g_ai_provider_index = ai_index_for(g_ai_cfg_provider);
+    select_combo(g_ai_provider_combo, g_ai_provider_index);
+    if (g_ai_model_row && g_ai_cfg_model) gtk_editable_set_text(GTK_EDITABLE(g_ai_model_row), g_ai_cfg_model);
+    if (g_ai_key_row && g_ai_cfg_key) gtk_editable_set_text(GTK_EDITABLE(g_ai_key_row), g_ai_cfg_key);
+    if (g_ai_base_row && g_ai_cfg_base) gtk_editable_set_text(GTK_EDITABLE(g_ai_base_row), g_ai_cfg_base);
+    g_setting_combo = FALSE;
+}
+
+static void on_ai_config_changed(GObject *obj, GParamSpec *pspec, gpointer data) {
+    (void)obj; (void)pspec; (void)data;
+    if (g_setting_combo) return;
+    if (!g_ai_config_hook) return;
+    static const char *provider_values[] = { "auto", "anthropic", "openai", "claude-cli", "codex-cli", "antigravity" };
+    guint sel = g_ai_provider_index;
+    if (sel >= G_N_ELEMENTS(provider_values)) sel = 0;
+    const char *provider = provider_values[sel];
+    if (g_getenv("SUPER_V_SELFTEST_AI_CONFIG")) g_printerr("AICFGDBG sel=%u provider=%s guarded=%d" "\n", sel, provider, (int)g_setting_combo);
+    const char *model = gtk_editable_get_text(GTK_EDITABLE(g_ai_model_row));
+    const char *key = gtk_editable_get_text(GTK_EDITABLE(g_ai_key_row));
+    const char *base = gtk_editable_get_text(GTK_EDITABLE(g_ai_base_row));
+    g_ai_config_hook(provider, model, key, base);
+}
+
+void super_v_ui_set_ai_config_hook(AiConfigHook cb) { g_ai_config_hook = cb; }
+
+void super_v_ui_set_ai_config_values(const char *provider, const char *model,
+                                     const char *key, const char *base) {
+    g_free(g_ai_cfg_provider); g_ai_cfg_provider = g_strdup(provider ? provider : "auto");
+    g_free(g_ai_cfg_model); g_ai_cfg_model = g_strdup(model ? model : "");
+    g_free(g_ai_cfg_key); g_ai_cfg_key = g_strdup(key ? key : "");
+    g_free(g_ai_cfg_base); g_ai_cfg_base = g_strdup(base ? base : "");
+    apply_ai_config_to_rows();
+}
+
 static void on_ai_generate_clicked(GtkButton *btn, gpointer data) {
     (void)btn; (void)data;
     if (!g_ai_prompt) return;
@@ -2986,15 +3073,15 @@ static void on_ai_generate_clicked(GtkButton *btn, gpointer data) {
     char *prompt = gtk_text_buffer_get_text(buf, &s, &e, FALSE);
     if (!prompt || !*prompt) {
         g_free(prompt);
-        super_v_ui_set_ai_status("Tulis dulu perintahnya");
+        super_v_ui_set_ai_status("Type an instruction first");
         return;
     }
     if (g_ai_generate_hook) {
-        super_v_ui_set_ai_status("menulis...");
+        super_v_ui_set_ai_status("writing...");
         g_ai_generate_hook(prompt, dropdown_text(g_ai_lang), dropdown_text(g_ai_tone),
                            dropdown_text(g_ai_format), dropdown_text(g_ai_target));
     } else {
-        super_v_ui_set_ai_status("AI belum siap");
+        super_v_ui_set_ai_status("AI is not ready");
     }
     g_free(prompt);
 }
@@ -3176,7 +3263,7 @@ static GtkWidget *create_main_window(AdwApplication *app) {
     gtk_widget_add_css_class(snip_title, "heading");
     gtk_widget_set_hexpand(snip_title, TRUE);
     gtk_widget_set_halign(snip_title, GTK_ALIGN_START);
-    GtkWidget *snip_add = gtk_button_new_with_label("Baru");
+    GtkWidget *snip_add = gtk_button_new_with_label("New");
     gtk_widget_add_css_class(snip_add, "flat");
     g_signal_connect(snip_add, "clicked", G_CALLBACK(on_snippet_add_clicked), NULL);
     gtk_box_append(GTK_BOX(snip_head), snip_title);
@@ -3197,7 +3284,7 @@ static GtkWidget *create_main_window(AdwApplication *app) {
     gtk_widget_set_margin_end(ai_box, 10);
     gtk_widget_set_margin_top(ai_box, 8);
 
-    GtkWidget *ai_head = gtk_label_new("Tulis dengan AI");
+    GtkWidget *ai_head = gtk_label_new("Write with AI");
     gtk_widget_add_css_class(ai_head, "heading");
     gtk_widget_set_halign(ai_head, GTK_ALIGN_START);
     gtk_box_append(GTK_BOX(ai_box), ai_head);
@@ -3226,7 +3313,7 @@ static GtkWidget *create_main_window(AdwApplication *app) {
     gtk_box_append(GTK_BOX(ai_box), g_ai_presets);
 
     GtkWidget *ai_actions = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
-    GtkWidget *ai_run = gtk_button_new_with_label("Buat");
+    GtkWidget *ai_run = gtk_button_new_with_label("Generate");
     gtk_widget_add_css_class(ai_run, "suggested-action");
     g_signal_connect(ai_run, "clicked", G_CALLBACK(on_ai_generate_clicked), NULL);
     g_ai_status = gtk_label_new("");
@@ -3247,7 +3334,7 @@ static GtkWidget *create_main_window(AdwApplication *app) {
     gtk_box_append(GTK_BOX(ai_box), ai_result_frame);
 
     GtkWidget *ai_result_actions = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
-    GtkWidget *ai_copy = gtk_button_new_with_label("Salin");
+    GtkWidget *ai_copy = gtk_button_new_with_label("Copy");
     GtkWidget *ai_paste = gtk_button_new_with_label("Paste");
     g_signal_connect(ai_copy, "clicked", G_CALLBACK(on_ai_copy_clicked), NULL);
     g_signal_connect(ai_paste, "clicked", G_CALLBACK(on_ai_paste_clicked), NULL);
@@ -3256,7 +3343,7 @@ static GtkWidget *create_main_window(AdwApplication *app) {
     gtk_box_append(GTK_BOX(ai_box), ai_result_actions);
 
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(ai_scroll), ai_box);
-    adw_view_stack_add_titled_with_icon(ADW_VIEW_STACK(g_stack), ai_scroll, "ai", "Tulis", "x-office-document-symbolic");
+    adw_view_stack_add_titled_with_icon(ADW_VIEW_STACK(g_stack), ai_scroll, "ai", "Write", "x-office-document-symbolic");
 
 
     g_signal_connect(g_stack, "notify::visible-child-name", G_CALLBACK(on_tab_switched), NULL);
@@ -3318,6 +3405,12 @@ static void on_app_activate(GtkApplication *app, gpointer user_data) {
         printf("VERIFY: image_paste_path=true\n");
         fflush(stdout);
         paste_file_after_hide(g_getenv("SUPER_V_SELFTEST_IMAGE_PASTE"), NULL);
+    }
+    if (g_getenv("SUPER_V_SELFTEST_AI_CONFIG")) {
+        g_timeout_add(1200, ai_config_test, NULL);
+    }
+    if (g_getenv("SUPER_V_SNAPSHOT_PREFS")) {
+        g_timeout_add(400, open_preferences_for_test, NULL);
     }
     if (g_getenv("SUPER_V_SNAPSHOT")) {
         guint delay = 1200;

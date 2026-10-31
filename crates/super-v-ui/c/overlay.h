@@ -13,6 +13,8 @@ typedef void (*SnippetAddHook)(const char *name, const char *body);
 typedef void (*SnippetDeleteHook)(long long id);
 typedef void (*AiGenerateHook)(const char *prompt, const char *lang, const char *tone,
                               const char *format, const char *target);
+typedef void (*AiConfigHook)(const char *provider, const char *model, const char *key,
+                            const char *base);
 typedef void (*DeleteCallback)(long long id);
 
 /* Lazy glyph provider. Fills rows [offset, offset+limit) for the given tab.
@@ -53,6 +55,9 @@ void super_v_ui_set_refresh_hook(RefreshHook cb);
 void super_v_ui_set_live_update_hook(UpdateHook cb);
 void super_v_ui_set_snippet_hooks(SnippetAddHook add, SnippetDeleteHook del);
 void super_v_ui_set_ai_generate_hook(AiGenerateHook cb);
+void super_v_ui_set_ai_config_hook(AiConfigHook cb);
+void super_v_ui_set_ai_config_values(const char *provider, const char *model,
+                                     const char *key, const char *base);
 void super_v_ui_add_snippet_row(const char *name, const char *body, long long id);
 void super_v_ui_clear_snippet_rows(void);
 void super_v_ui_set_ai_result(const char *text);

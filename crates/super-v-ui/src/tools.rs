@@ -18,6 +18,8 @@ extern "C" {
         add: extern "C" fn(*const c_char, *const c_char),
         del: extern "C" fn(i64),
     );
+    fn super_v_ui_set_ai_config_hook(cb: extern "C" fn(*const c_char, *const c_char, *const c_char, *const c_char));
+    fn super_v_ui_set_ai_config_values(provider: *const c_char, model: *const c_char, key: *const c_char, base: *const c_char);
     fn super_v_ui_set_ai_generate_hook(
         cb: extern "C" fn(*const c_char, *const c_char, *const c_char, *const c_char, *const c_char),
     );
@@ -75,6 +77,14 @@ extern "C" fn on_snippet_delete(id: i64) {
     items.retain(|s| s.id != id);
     store_snippets(&items);
     push_snippet_rows();
+    let cfg = load_settings();
+    let provider = CString::new(cfg.ai_provider).unwrap_or_default();
+    let model = CString::new(cfg.ai_model).unwrap_or_default();
+    let key = CString::new(cfg.ai_api_key).unwrap_or_default();
+    let base = CString::new(cfg.ai_base_url).unwrap_or_default();
+    unsafe {
+        super_v_ui_set_ai_config_values(provider.as_ptr(), model.as_ptr(), key.as_ptr(), base.as_ptr());
+    }
 }
 
 extern "C" fn on_ai_generate(
@@ -124,10 +134,29 @@ extern "C" fn deliver_ai_result(data: *mut c_void) {
     }
 }
 
+extern "C" fn on_ai_config(provider: *const c_char, model: *const c_char,
+                          key: *const c_char, base: *const c_char) {
+    let read = |p: *const c_char| -> String {
+        if p.is_null() {
+            String::new()
+        } else {
+            unsafe { CStr::from_ptr(p) }.to_string_lossy().to_string()
+        }
+    };
+    let mut cfg = load_settings();
+    cfg.ai_provider = read(provider);
+    cfg.ai_model = read(model);
+    cfg.ai_api_key = read(key);
+    cfg.ai_base_url = read(base);
+    crate::save_settings(&cfg);
+    append_log("ai config saved");
+}
+
 pub fn init() {
     unsafe {
         super_v_ui_set_snippet_hooks(on_snippet_add, on_snippet_delete);
         super_v_ui_set_ai_generate_hook(on_ai_generate);
+        super_v_ui_set_ai_config_hook(on_ai_config);
     }
     push_snippet_rows();
 }
@@ -194,7 +223,7 @@ fn detect_target(prompt: &str, chosen: &str) -> String {
     if chosen.contains("chat") {
         return "chat".into();
     }
-    if chosen.contains("dokumen") {
+    if chosen.contains("document") {
         return "document".into();
     }
     let p = prompt.to_lowercase();
@@ -222,8 +251,8 @@ fn build_system_prompt(lang: &str, tone: &str, format: &str, target: &str) -> St
         _ => "Pakai bahasa yang sama dengan permintaan pengguna.",
     };
     let tone_rule = match tone.to_lowercase().as_str() {
-        "sopan" => "Nada sopan, hangat, tanpa basa-basi berlebih.",
-        "santai" => "Nada santai seperti mengobrol, kalimat pendek.",
+        "polite" => "Nada sopan, hangat, tanpa basa-basi berlebih.",
+        "casual" => "Nada santai seperti mengobrol, kalimat pendek.",
         "formal" => "Nada formal dan rapi, tanpa singkatan.",
         _ => "Nada netral dan jelas.",
     };
@@ -235,7 +264,7 @@ fn build_system_prompt(lang: &str, tone: &str, format: &str, target: &str) -> St
     };
     let format_override = match format.to_lowercase().as_str() {
         "markdown" => " Gunakan Markdown.",
-        "teks biasa" => " Gunakan teks biasa tanpa Markdown.",
+        "plain text" => " Gunakan teks biasa tanpa Markdown.",
         _ => "",
     };
     format!(
