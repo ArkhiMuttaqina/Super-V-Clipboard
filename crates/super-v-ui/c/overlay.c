@@ -2363,6 +2363,12 @@ static gboolean live_update_tick(gpointer data) {
     if (!g_main_window || !gtk_widget_get_visible(g_main_window)) {
         return G_SOURCE_CONTINUE;
     }
+    /* Rebuilding the history while another tab is open (GIF thumbnails,
+     * emoji grid) is pure main-thread work for nothing. */
+    if (g_stack) {
+        const char *page = adw_view_stack_get_visible_child_name(ADW_VIEW_STACK(g_stack));
+        if (!page || strcmp(page, "clipboard") != 0) return G_SOURCE_CONTINUE;
+    }
     if (g_live_update_hook) g_live_update_hook();
     return G_SOURCE_CONTINUE;
 }
@@ -2923,7 +2929,7 @@ static void on_app_activate(GtkApplication *app, gpointer user_data) {
     if (g_getenv("SUPER_V_IMAGE_PASTE_ON_SHOW")) {
         g_timeout_add(1500, image_paste_env, NULL);
     }   /* network + IPC must not delay the first frame */
-    g_timeout_add(700, live_update_tick, NULL);
+    g_timeout_add(1000, live_update_tick, NULL);
     if (g_getenv("SUPER_V_FPS_LOG") && g_main_window) {
         gtk_widget_set_visible(g_main_window, TRUE);
         gtk_window_present(GTK_WINDOW(g_main_window));

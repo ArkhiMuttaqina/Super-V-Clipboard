@@ -463,6 +463,15 @@ fn start_gif_page(provider: String, key: String, query: String) {
     });
 }
 
+/// Runs on the GTK main thread: adds one scanned local GIF.
+extern "C" fn deliver_gif_row(data: *mut std::ffi::c_void) {
+    if data.is_null() {
+        return;
+    }
+    let row = unsafe { Box::from_raw(data as *mut (String, String)) };
+    append_gif_rows(vec![(row.0.clone(), row.1.clone())]);
+}
+
 /// Runs on the GTK main thread: the only place widgets are touched.
 extern "C" fn deliver_gif_page(data: *mut std::ffi::c_void) {
     if data.is_null() {
@@ -507,9 +516,23 @@ fn load_gifs() {
     *GIF_TOTAL.lock().unwrap_or_else(|e| e.into_inner()) = 0;
     *GIF_SEEN.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::collections::HashSet::new());
 
-    for item in super_v_core::GifScanner::default_dirs().scan_local_gifs(60) {
-        append_gif_rows(vec![(item.path, item.filename)]);
-    }
+    /* The filesystem walk can take seconds on a big home directory; it must
+     * never run on the GTK thread or the tab switch freezes the app. */
+    std::thread::spawn(|| {
+        let started = std::time::Instant::now();
+        let items = super_v_core::GifScanner::default_dirs().scan_local_gifs(60);
+        let elapsed = started.elapsed().as_millis();
+        for item in items {
+            let row = (item.path, item.filename);
+            unsafe {
+                super_v_ui_post_to_main(
+                    deliver_gif_row,
+                    Box::into_raw(Box::new(row)) as *mut std::ffi::c_void,
+                );
+            }
+        }
+        append_log(&format!("gif local scan: {} ms", elapsed));
+    });
 
     let cfg = load_settings();
     if provider == "local" {
