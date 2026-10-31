@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/super-v-backend-wlr",
     "crates/super-v-backend-x11",
+    "crates/super-v-x11watch",
     "crates/super-v-core",
     "crates/super-v-daemon",
     "crates/super-v-ui",

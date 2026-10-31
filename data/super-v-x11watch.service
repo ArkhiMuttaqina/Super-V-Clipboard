@@ -1,0 +1,18 @@
+[Unit]
+Description=Super V Clipboard - X11 clipboard watcher
+Documentation=https://github.com/ArkhiMuttaqina/Super-V-Clipboard
+After=graphical-session.target super-v-clipboard.service
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+# Reads the CLIPBOARD selection through XWayland, which - unlike a background
+# Wayland client - needs no keyboard focus. This is the capture path that makes
+# every copy land in the history.
+Environment=SUPER_V_X11WATCH_INTERVAL_MS=400
+ExecStart=%h/.local/bin/super-v-x11watch
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target
