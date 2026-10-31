@@ -24,6 +24,13 @@ extern "C" {
     fn super_v_ui_set_ai_models_hook(cb: extern "C" fn(*const c_char));
     fn super_v_ui_set_ai_models(lines: *const c_char);
     fn super_v_ui_set_ai_banner(text: *const c_char);
+    fn super_v_ui_set_ai_status(text: *const c_char);
+    fn super_v_ui_ai_stream_reset();
+    fn super_v_ui_ai_stream_delta(text: *const c_char);
+    fn super_v_ui_ai_stream_done();
+    fn super_v_ui_set_current_config(text: *const c_char);
+    fn super_v_ui_set_provider_items(lines: *const c_char);
+    fn super_v_ui_set_ai_refresh_hook(cb: extern "C" fn());
     fn super_v_ui_set_ai_generate_hook(
         cb: extern "C" fn(*const c_char, *const c_char, *const c_char, *const c_char, *const c_char),
     );
@@ -91,6 +98,201 @@ extern "C" fn on_snippet_delete(id: i64) {
     }
 }
 
+extern "C" fn deliver_reset(_data: *mut c_void) {
+    unsafe { super_v_ui_ai_stream_reset() };
+}
+
+extern "C" fn deliver_delta(data: *mut c_void) {
+    if data.is_null() {
+        return;
+    }
+    let text = unsafe { Box::from_raw(data as *mut String) };
+    if let Ok(c) = CString::new(text.as_str()) {
+        unsafe { super_v_ui_ai_stream_delta(c.as_ptr()) };
+    }
+}
+
+extern "C" fn deliver_stream_done(data: *mut c_void) {
+    unsafe { super_v_ui_ai_stream_done() };
+    if data.is_null() {
+        return;
+    }
+    let text = unsafe { Box::from_raw(data as *mut String) };
+    if !text.is_empty() {
+        if let Ok(c) = CString::new(text.as_str()) {
+            unsafe { super_v_ui_set_ai_status(c.as_ptr()) };
+        }
+    }
+}
+
+fn post_delta(text: &str) {
+    unsafe {
+        super_v_ui_post_to_main(
+            deliver_delta,
+            Box::into_raw(Box::new(text.to_string())) as *mut c_void,
+        )
+    };
+}
+
+fn sse_lines(resp: &mut ureq::Body, mut on_data: impl FnMut(&str)) -> Result<(), String> {
+    use std::io::BufRead;
+    let reader = resp.as_reader();
+    let buf = std::io::BufReader::new(reader);
+    for line in buf.lines() {
+        let line = line.map_err(|e| e.to_string())?;
+        if let Some(rest) = line.strip_prefix("data: ") {
+            if rest.trim() == "[DONE]" {
+                return Ok(());
+            }
+            on_data(rest);
+        }
+    }
+    Ok(())
+}
+
+fn ai_http_stream(
+    provider: Provider,
+    cfg: &Settings,
+    model_override: &str,
+    system: &str,
+    prompt: &str,
+    on_delta: &mut dyn FnMut(&str),
+) -> Result<String, String> {
+    let key = if !cfg.ai_api_key.is_empty() {
+        cfg.ai_api_key.clone()
+    } else if provider == Provider::Anthropic {
+        std::env::var("ANTHROPIC_API_KEY").unwrap_or_default()
+    } else {
+        std::env::var("OPENAI_API_KEY").unwrap_or_default()
+    };
+    if key.is_empty() {
+        return Err("API key AI belum diisi".into());
+    }
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(120)))
+        .build()
+        .into();
+    let mut full = String::new();
+
+    if provider == Provider::Anthropic {
+        let model = if !model_override.is_empty() {
+            model_override
+        } else if cfg.ai_model.is_empty() {
+            "claude-sonnet-4-5"
+        } else {
+            cfg.ai_model.as_str()
+        };
+        let body = serde_json::json!({
+            "model": model,
+            "max_tokens": 1024,
+            "stream": true,
+            "system": system,
+            "messages": [{ "role": "user", "content": prompt }]
+        });
+        let mut resp = agent
+            .post("https://api.anthropic.com/v1/messages")
+            .header("x-api-key", &key)
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .send(body.to_string())
+            .map_err(|e| e.to_string())?;
+        sse_lines(resp.body_mut(), |data| {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
+                if v["type"] == "content_block_delta" {
+                    if let Some(chunk) = v["delta"]["text"].as_str() {
+                        full.push_str(chunk);
+                        on_delta(chunk);
+                    }
+                }
+            }
+        })?;
+        return Ok(full);
+    }
+
+    let base = if cfg.ai_base_url.is_empty() {
+        "https://api.openai.com/v1".to_string()
+    } else {
+        cfg.ai_base_url.trim_end_matches('/').to_string()
+    };
+    let model = if !model_override.is_empty() {
+        model_override
+    } else if cfg.ai_model.is_empty() {
+        "gpt-4o-mini"
+    } else {
+        cfg.ai_model.as_str()
+    };
+    let body = serde_json::json!({
+        "model": model,
+        "stream": true,
+        "messages": [
+            { "role": "system", "content": system },
+            { "role": "user", "content": prompt }
+        ]
+    });
+    let mut resp = agent
+        .post(&format!("{base}/chat/completions"))
+        .header("authorization", &format!("Bearer {key}"))
+        .header("content-type", "application/json")
+        .send(body.to_string())
+        .map_err(|e| e.to_string())?;
+    sse_lines(resp.body_mut(), |data| {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
+            if let Some(chunk) = v["choices"][0]["delta"]["content"].as_str() {
+                full.push_str(chunk);
+                on_delta(chunk);
+            }
+        }
+    })?;
+    Ok(full)
+}
+
+fn run_provider_stream(
+    cfg: &Settings,
+    system: &str,
+    prompt: &str,
+    on_delta: &mut dyn FnMut(&str),
+) -> Result<String, String> {
+    let provider = resolve(cfg).ok_or_else(|| {
+        "Tidak ada provider AI: isi API key di Settings atau pasang claude/codex CLI".to_string()
+    })?;
+    match provider {
+        Provider::ClaudeCli | Provider::CodexCli | Provider::AntigravityCli => {
+            let text = ai_cli(provider, system, prompt)?;
+            on_delta(&text);
+            Ok(text)
+        }
+        _ => {
+            let mut chain: Vec<String> = cfg.ai_models.clone();
+            if !cfg.ai_model.is_empty() && !chain.iter().any(|m| m == &cfg.ai_model) {
+                chain.insert(0, cfg.ai_model.clone());
+            }
+            if chain.is_empty() {
+                chain.push(String::new());
+            }
+            let mut last = String::from("no model tried");
+            for model in chain {
+                let started = std::cell::Cell::new(false);
+                let mut emit = |chunk: &str| {
+                    started.set(true);
+                    on_delta(chunk);
+                };
+                match ai_http_stream(provider, cfg, &model, system, prompt, &mut emit) {
+                    Ok(text) => return Ok(text),
+                    Err(err) => {
+                        if !started.get() {
+                            last = format!("{model}: {err}");
+                            append_log(&format!("stream model failed: {last}"));
+                            continue;
+                        }
+                        return Err(err);
+                    }
+                }
+            }
+            Err(last)
+        }
+    }
+}
+
 extern "C" fn on_ai_generate(
     prompt: *const c_char,
     lang: *const c_char,
@@ -115,14 +317,16 @@ extern "C" fn on_ai_generate(
         let cfg = load_settings();
         let target = detect_target(&prompt, &chosen);
         let system = build_system_prompt(&lang, &tone, &format, &target);
-        let text = match run_provider(&cfg, &system, &prompt) {
-            Ok(text) => text,
+        unsafe { super_v_ui_post_to_main(deliver_reset, std::ptr::null_mut()) };
+        let outcome = run_provider_stream(&cfg, &system, &prompt, &mut |chunk| post_delta(chunk));
+        let status = match outcome {
+            Ok(_) => String::new(),
             Err(err) => format!("Gagal: {err}"),
         };
         unsafe {
             super_v_ui_post_to_main(
-                deliver_ai_result,
-                Box::into_raw(Box::new(text)) as *mut c_void,
+                deliver_stream_done,
+                Box::into_raw(Box::new(status)) as *mut c_void,
             )
         };
     });
@@ -135,6 +339,103 @@ extern "C" fn deliver_ai_result(data: *mut c_void) {
     let text = unsafe { Box::from_raw(data as *mut String) };
     if let Ok(text) = CString::new(text.as_str()) {
         unsafe { super_v_ui_set_ai_result(text.as_ptr()) };
+    }
+}
+
+fn cli_version(bin: &str) -> Option<String> {
+    let out = std::process::Command::new(bin).arg("--version").output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let line = text.lines().next().unwrap_or("").trim();
+    if line.is_empty() {
+        None
+    } else {
+        Some(line.chars().take(48).collect())
+    }
+}
+
+fn push_provider_items() {
+    let mut lines = String::new();
+    lines.push_str("auto	Auto detect");
+    lines.push('\n');
+    lines.push_str("anthropic	Anthropic API");
+    lines.push('\n');
+    lines.push_str("openai	OpenAI compatible API");
+    for (value, bin, label) in [
+        ("claude-cli", "claude", "claude CLI"),
+        ("codex-cli", "codex", "codex CLI"),
+        ("antigravity", "antigravity", "antigravity CLI"),
+    ] {
+        if let Some(version) = cli_version(bin) {
+            lines.push('\n');
+            lines.push_str(value);
+            lines.push('\t');
+            lines.push_str(&format!("{label} · {version}"));
+        }
+    }
+    if let Ok(c) = CString::new(lines) {
+        unsafe { super_v_ui_set_provider_items(c.as_ptr()) };
+    }
+}
+
+fn current_config_text(cfg: &Settings) -> String {
+    let provider = match resolve(cfg) {
+        Some(Provider::Anthropic) => "Anthropic API",
+        Some(Provider::OpenAi) => "OpenAI compatible API",
+        Some(Provider::ClaudeCli) => "claude CLI",
+        Some(Provider::CodexCli) => "codex CLI",
+        Some(Provider::AntigravityCli) => "antigravity CLI",
+        None => "nothing configured",
+    };
+    let source = if cfg.ai_provider != "auto" {
+        "selected manually"
+    } else {
+        "auto detected"
+    };
+    let mut details = Vec::new();
+    let model = if !cfg.ai_models.is_empty() {
+        cfg.ai_models.join(" → ")
+    } else if !cfg.ai_model.is_empty() {
+        cfg.ai_model.clone()
+    } else {
+        "provider default".to_string()
+    };
+    details.push(format!("Model: {model}"));
+    if let Some(base) = cfg.ai_base_url.strip_suffix('/').or(Some(cfg.ai_base_url.as_str())) {
+        if !base.is_empty() {
+            details.push(format!("Base URL: {base}"));
+        }
+    }
+    let key = if !cfg.ai_api_key.is_empty() {
+        "key set"
+    } else if std::env::var("ANTHROPIC_API_KEY").is_ok() || std::env::var("OPENAI_API_KEY").is_ok() {
+        "key from environment"
+    } else {
+        "no key"
+    };
+    details.push(key.to_string());
+    let mut missing = Vec::new();
+    for (bin, label) in [("claude", "claude"), ("codex", "codex"), ("antigravity", "antigravity")] {
+        if !which(bin) {
+            missing.push(label);
+        }
+    }
+    if !missing.is_empty() {
+        details.push(format!("not installed: {}", missing.join(", ")));
+    }
+    format!("{provider} ({source})
+{}", details.join(" · "))
+}
+
+extern "C" fn on_ai_refresh() {
+    let cfg = load_settings();
+    push_provider_items();
+    push_current_config(&cfg);
+    post_banner(detected_banner(&cfg));
+}
+
+fn push_current_config(cfg: &Settings) {
+    if let Ok(c) = CString::new(current_config_text(cfg)) {
+        unsafe { super_v_ui_set_current_config(c.as_ptr()) };
     }
 }
 
@@ -334,9 +635,12 @@ pub fn init() {
         super_v_ui_set_ai_config_hook(on_ai_config);
         super_v_ui_set_ai_test_hook(on_ai_test);
         super_v_ui_set_ai_models_hook(on_ai_models_changed);
+        super_v_ui_set_ai_refresh_hook(on_ai_refresh);
     }
     let cfg = load_settings();
     post_banner(detected_banner(&cfg));
+    push_provider_items();
+    push_current_config(&cfg);
     push_snippet_rows();
 }
 
