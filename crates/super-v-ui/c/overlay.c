@@ -34,6 +34,17 @@ static GtkWidget *g_ai_provider_combo;
 static GtkWidget *g_ai_model_row;
 static GtkWidget *g_ai_key_row;
 static GtkWidget *g_ai_base_row;
+static GtkWidget *g_ai_models_list;
+static GtkWidget *g_ai_banner;
+static char *g_ai_models_csv;
+static AiTestHook g_ai_test_hook;
+static AiModelsHook g_ai_models_hook;
+void super_v_ui_set_ai_test_hook(AiTestHook cb);
+void super_v_ui_set_ai_models_hook(AiModelsHook cb);
+void super_v_ui_set_ai_models(const char *lines);
+void super_v_ui_set_ai_banner(const char *text);
+static void on_ai_model_toggled(GtkCheckButton *btn, gpointer data);
+static void on_ai_smoke_test(GtkButton *btn, gpointer data);
 static void on_ai_config_changed(GObject *obj, GParamSpec *pspec, gpointer data);
 static void on_ai_provider_selected(GObject *obj, GParamSpec *pspec, gpointer data);
 static char *g_ai_cfg_provider;
@@ -1807,6 +1818,36 @@ void super_v_ui_show_settings(void *parent_window) {
     adw_preferences_row_set_title(ADW_PREFERENCES_ROW(g_ai_base_row), "Base URL (optional, e.g. https://api.openai.com/v1)");
     g_signal_connect(g_ai_base_row, "changed", G_CALLBACK(on_ai_config_changed), NULL);
     adw_preferences_group_add(ai_group, g_ai_base_row);
+
+    AdwPreferencesGroup *ai_models_group = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
+    adw_preferences_group_set_title(ai_models_group, "Models and fallback");
+    adw_preferences_group_set_description(ai_models_group,
+        "Run a smoke test to list every model this endpoint offers, then tick the ones to try in order.");
+    adw_preferences_page_add(ai_page, ai_models_group);
+
+    AdwActionRow *test_row = ADW_ACTION_ROW(adw_action_row_new());
+    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(test_row), "Smoke test");
+    adw_action_row_set_subtitle(test_row, "Calls the provider and lists its models");
+    GtkWidget *test_btn = gtk_button_new_with_label("Test");
+    gtk_widget_add_css_class(test_btn, "flat");
+    gtk_widget_set_valign(test_btn, GTK_ALIGN_CENTER);
+    g_signal_connect(test_btn, "clicked", G_CALLBACK(on_ai_smoke_test), NULL);
+    adw_action_row_add_suffix(test_row, test_btn);
+    adw_preferences_group_add(ai_models_group, GTK_WIDGET(test_row));
+
+    g_ai_banner = gtk_label_new("");
+    gtk_widget_add_css_class(g_ai_banner, "dim-label");
+    gtk_label_set_wrap(GTK_LABEL(g_ai_banner), TRUE);
+    gtk_label_set_xalign(GTK_LABEL(g_ai_banner), 0.0);
+    gtk_widget_set_margin_start(g_ai_banner, 12);
+    gtk_widget_set_margin_end(g_ai_banner, 12);
+    adw_preferences_group_add(ai_models_group, g_ai_banner);
+
+    g_ai_models_list = gtk_list_box_new();
+    gtk_list_box_set_selection_mode(GTK_LIST_BOX(g_ai_models_list), GTK_SELECTION_NONE);
+    gtk_widget_set_margin_start(g_ai_models_list, 12);
+    gtk_widget_set_margin_end(g_ai_models_list, 12);
+    adw_preferences_group_add(ai_models_group, g_ai_models_list);
     apply_ai_config_to_rows();
 
     track_dialog(dialog);
@@ -2839,10 +2880,11 @@ static guint ai_index_for(const char *provider) {
     return 0;
 }
 
-static const char *g_ai_language_options[] = { "Auto", "Indonesia", "English", NULL };
-static const char *g_ai_tone_options[] = { "Polite", "Casual", "Neutral", "Formal", NULL };
-static const char *g_ai_format_options[] = { "Auto", "Markdown", "Plain text", NULL };
-static const char *g_ai_target_options[] = { "Auto", "Chat (WhatsApp/Telegram)", "Document", "Email", NULL };
+static const char *g_ai_language_options[] = {
+    "Any language", "Indonesian", "English", "Malay", "Arabic", "Mandarin",
+    "Japanese", "Korean", "Spanish", "French", "German", "Hindi",
+    "Javanese", "Sundanese", NULL
+};
 
 void super_v_ui_set_snippet_hooks(SnippetAddHook add, SnippetDeleteHook del) {
     g_snippet_add_hook = add;
@@ -2956,6 +2998,40 @@ static void on_snippet_add_clicked(GtkButton *btn, gpointer data) {
 static char *ai_result_text(void);
 void super_v_ui_show_settings(void *parent_window);
 
+static gboolean ai_test_models(gpointer data) {
+    (void)data;
+    super_v_ui_show_settings(g_main_window);
+    on_ai_smoke_test(NULL, NULL);
+    return G_SOURCE_REMOVE;
+}
+
+static gboolean models_report(gpointer data) {
+    (void)data;
+    int rows = 0, checked = 0;
+    if (g_ai_models_list) {
+        GtkWidget *row = gtk_widget_get_first_child(g_ai_models_list);
+        while (row) {
+            rows++;
+            GtkWidget *check = g_object_get_data(G_OBJECT(row), "check");
+            if (check && gtk_check_button_get_active(GTK_CHECK_BUTTON(check))) checked++;
+            row = gtk_widget_get_next_sibling(row);
+        }
+    }
+    if (g_getenv("SUPER_V_SELFTEST_AI_PICK")) {
+        int take = 2;
+        GtkWidget *row = gtk_widget_get_first_child(g_ai_models_list);
+        while (row && take > 0) {
+            GtkWidget *check = g_object_get_data(G_OBJECT(row), "check");
+            if (check) { gtk_check_button_set_active(GTK_CHECK_BUTTON(check), TRUE); take--; }
+            row = gtk_widget_get_next_sibling(row);
+        }
+    }
+    printf("MODELDBG rows=%d checked=%d banner=%s\n", rows, checked,
+        g_ai_banner ? gtk_label_get_text(GTK_LABEL(g_ai_banner)) : "-");
+    fflush(stdout);
+    return G_SOURCE_REMOVE;
+}
+
 static gboolean ai_config_test(gpointer data) {
     (void)data;
     super_v_ui_show_settings(g_main_window);
@@ -3026,6 +3102,75 @@ static void on_ai_provider_selected(GObject *obj, GParamSpec *pspec, gpointer da
     on_ai_config_changed(NULL, NULL, NULL);
 }
 
+static void collect_models(void) {
+    if (g_getenv("SUPER_V_SELFTEST_AI_MODELS"))
+        g_printerr("COLLECTDBG list=%p hook=%p\n", (void*)g_ai_models_list, (void*)g_ai_models_hook);
+    if (!g_ai_models_list || !g_ai_models_hook) return;
+    GString *csv = g_string_new(NULL);
+    GtkWidget *row = gtk_widget_get_first_child(g_ai_models_list);
+    while (row) {
+        GtkWidget *check = g_object_get_data(G_OBJECT(row), "check");
+        const char *model = g_object_get_data(G_OBJECT(row), "model");
+        if (check && model && gtk_check_button_get_active(GTK_CHECK_BUTTON(check))) {
+            if (csv->len) g_string_append_c(csv, ',');
+            g_string_append(csv, model);
+        }
+        row = gtk_widget_get_next_sibling(row);
+    }
+    g_ai_models_hook(csv->str);
+    g_string_free(csv, TRUE);
+}
+
+static void on_ai_model_toggled(GtkCheckButton *btn, gpointer data) {
+    (void)btn; (void)data;
+    collect_models();
+}
+
+static void on_ai_smoke_test(GtkButton *btn, gpointer data) {
+    (void)btn; (void)data;
+    if (g_ai_test_hook) g_ai_test_hook();
+    if (g_ai_banner) gtk_label_set_text(GTK_LABEL(g_ai_banner), "Testing…");
+}
+
+void super_v_ui_set_ai_models(const char *lines) {
+    if (!g_ai_models_list) return;
+    GtkWidget *row = gtk_widget_get_first_child(g_ai_models_list);
+    while (row) {
+        GtkWidget *next = gtk_widget_get_next_sibling(row);
+        gtk_list_box_remove(GTK_LIST_BOX(g_ai_models_list), row);
+        row = next;
+    }
+    if (!lines || !*lines) return;
+    char **items = g_strsplit(lines, "\n", -1);
+    for (int i = 0; items[i]; i++) {
+        if (!*items[i]) continue;
+        char **parts = g_strsplit(items[i], "\t", 2);
+        const char *model = parts[0];
+        gboolean selected = parts[1] && atoi(parts[1]) == 1;
+        GtkWidget *child = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+        GtkWidget *check = gtk_check_button_new_with_label(model);
+        gtk_check_button_set_active(GTK_CHECK_BUTTON(check), selected);
+        g_signal_connect(check, "toggled", G_CALLBACK(on_ai_model_toggled), NULL);
+        g_object_set_data(G_OBJECT(check), "model", g_strdup(model));
+        g_object_set_data(G_OBJECT(child), "check", check);
+        g_object_set_data_full(G_OBJECT(child), "model", g_strdup(model), g_free);
+        gtk_widget_add_css_class(check, "dim-label");
+        gtk_box_append(GTK_BOX(child), check);
+        gtk_list_box_append(GTK_LIST_BOX(g_ai_models_list), child);
+        GtkWidget *lrow = gtk_widget_get_last_child(g_ai_models_list);
+        if (lrow) {
+            g_object_set_data(G_OBJECT(lrow), "check", check);
+            g_object_set_data_full(G_OBJECT(lrow), "model", g_strdup(model), g_free);
+        }
+        g_strfreev(parts);
+    }
+    g_strfreev(items);
+}
+
+void super_v_ui_set_ai_banner(const char *text) {
+    if (g_ai_banner) gtk_label_set_text(GTK_LABEL(g_ai_banner), text ? text : "");
+}
+
 static void apply_ai_config_to_rows(void) {
     if (!g_ai_provider_combo) return;
     g_setting_combo = TRUE;
@@ -3037,6 +3182,9 @@ static void apply_ai_config_to_rows(void) {
     if (g_ai_base_row && g_ai_cfg_base) gtk_editable_set_text(GTK_EDITABLE(g_ai_base_row), g_ai_cfg_base);
     g_setting_combo = FALSE;
 }
+
+void super_v_ui_set_ai_test_hook(AiTestHook cb) { g_ai_test_hook = cb; }
+void super_v_ui_set_ai_models_hook(AiModelsHook cb) { g_ai_models_hook = cb; }
 
 static void on_ai_config_changed(GObject *obj, GParamSpec *pspec, gpointer data) {
     (void)obj; (void)pspec; (void)data;
@@ -3078,8 +3226,7 @@ static void on_ai_generate_clicked(GtkButton *btn, gpointer data) {
     }
     if (g_ai_generate_hook) {
         super_v_ui_set_ai_status("writing...");
-        g_ai_generate_hook(prompt, dropdown_text(g_ai_lang), dropdown_text(g_ai_tone),
-                           dropdown_text(g_ai_format), dropdown_text(g_ai_target));
+        g_ai_generate_hook(prompt, dropdown_text(g_ai_lang), "Auto", "Auto", "Auto");
     } else {
         super_v_ui_set_ai_status("AI is not ready");
     }
@@ -3299,17 +3446,9 @@ static GtkWidget *create_main_window(AdwApplication *app) {
 
     g_ai_presets = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
     g_ai_lang = gtk_drop_down_new_from_strings(g_ai_language_options);
-    g_ai_tone = gtk_drop_down_new_from_strings(g_ai_tone_options);
-    g_ai_format = gtk_drop_down_new_from_strings(g_ai_format_options);
-    g_ai_target = gtk_drop_down_new_from_strings(g_ai_target_options);
     gtk_widget_set_hexpand(g_ai_lang, TRUE);
-    gtk_widget_set_hexpand(g_ai_tone, TRUE);
-    gtk_widget_set_hexpand(g_ai_format, TRUE);
-    gtk_widget_set_hexpand(g_ai_target, TRUE);
+    gtk_widget_set_tooltip_text(g_ai_lang, "Target language for the result");
     gtk_box_append(GTK_BOX(g_ai_presets), g_ai_lang);
-    gtk_box_append(GTK_BOX(g_ai_presets), g_ai_tone);
-    gtk_box_append(GTK_BOX(g_ai_presets), g_ai_format);
-    gtk_box_append(GTK_BOX(g_ai_presets), g_ai_target);
     gtk_box_append(GTK_BOX(ai_box), g_ai_presets);
 
     GtkWidget *ai_actions = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
@@ -3405,6 +3544,10 @@ static void on_app_activate(GtkApplication *app, gpointer user_data) {
         printf("VERIFY: image_paste_path=true\n");
         fflush(stdout);
         paste_file_after_hide(g_getenv("SUPER_V_SELFTEST_IMAGE_PASTE"), NULL);
+    }
+    if (g_getenv("SUPER_V_SELFTEST_AI_MODELS")) {
+        g_timeout_add(1500, ai_test_models, NULL);
+        g_timeout_add(5000, models_report, NULL);
     }
     if (g_getenv("SUPER_V_SELFTEST_AI_CONFIG")) {
         g_timeout_add(1200, ai_config_test, NULL);

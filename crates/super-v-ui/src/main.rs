@@ -123,6 +123,7 @@ pub(crate) struct Settings {
     #[serde(default)]
     pub(crate) ai_base_url: String,
     #[serde(default)]
+    pub(crate) ai_models: Vec<String>,
     pub(crate) snippets: Vec<tools::Snippet>,
 }
 
@@ -141,6 +142,7 @@ impl Default for Settings {
             ai_model: String::new(),
             ai_api_key: String::new(),
             ai_base_url: String::new(),
+            ai_models: Vec::new(),
             snippets: Vec::new(),
         }
     }

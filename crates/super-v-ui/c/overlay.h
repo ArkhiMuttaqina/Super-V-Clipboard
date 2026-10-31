@@ -15,6 +15,8 @@ typedef void (*AiGenerateHook)(const char *prompt, const char *lang, const char 
                               const char *format, const char *target);
 typedef void (*AiConfigHook)(const char *provider, const char *model, const char *key,
                             const char *base);
+typedef void (*AiTestHook)(void);
+typedef void (*AiModelsHook)(const char *csv);
 typedef void (*DeleteCallback)(long long id);
 
 /* Lazy glyph provider. Fills rows [offset, offset+limit) for the given tab.
@@ -58,6 +60,10 @@ void super_v_ui_set_ai_generate_hook(AiGenerateHook cb);
 void super_v_ui_set_ai_config_hook(AiConfigHook cb);
 void super_v_ui_set_ai_config_values(const char *provider, const char *model,
                                      const char *key, const char *base);
+void super_v_ui_set_ai_test_hook(AiTestHook cb);
+void super_v_ui_set_ai_models_hook(AiModelsHook cb);
+void super_v_ui_set_ai_models(const char *lines);
+void super_v_ui_set_ai_banner(const char *text);
 void super_v_ui_add_snippet_row(const char *name, const char *body, long long id);
 void super_v_ui_clear_snippet_rows(void);
 void super_v_ui_set_ai_result(const char *text);
