@@ -1,5 +1,7 @@
 use anyhow::Result;
 use std::env;
+mod tools;
+
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
 use std::sync::OnceLock;
@@ -106,12 +108,22 @@ fn warm_glyph_index() {
 /* ------------------------------------------------------------------ settings */
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct Settings {
+pub(crate) struct Settings {
     emoji_languages: String,
     gif_provider: String,
     gif_api_key: String,
     #[serde(default = "default_placement")]
     placement: String,
+    #[serde(default)]
+    pub(crate) ai_provider: String,
+    #[serde(default)]
+    pub(crate) ai_model: String,
+    #[serde(default)]
+    pub(crate) ai_api_key: String,
+    #[serde(default)]
+    pub(crate) ai_base_url: String,
+    #[serde(default)]
+    pub(crate) snippets: Vec<tools::Snippet>,
 }
 
 fn default_placement() -> String {
@@ -125,11 +137,16 @@ impl Default for Settings {
             gif_provider: "local".to_string(),
             gif_api_key: String::new(),
             placement: default_placement(),
+            ai_provider: "auto".to_string(),
+            ai_model: String::new(),
+            ai_api_key: String::new(),
+            ai_base_url: String::new(),
+            snippets: Vec::new(),
         }
     }
 }
 
-fn config_dir() -> std::path::PathBuf {
+pub(crate) fn config_dir() -> std::path::PathBuf {
     if let Ok(x) = std::env::var("XDG_CONFIG_HOME") {
         if !x.is_empty() {
             return std::path::PathBuf::from(x).join("super-v-clipboard");
@@ -143,7 +160,7 @@ fn settings_path() -> std::path::PathBuf {
     config_dir().join("settings.json")
 }
 
-fn load_settings() -> Settings {
+pub(crate) fn load_settings() -> Settings {
     let path = settings_path();
     match std::fs::read_to_string(&path) {
         Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
@@ -608,7 +625,7 @@ extern "C" fn on_gif_search(query: *const c_char) {
         }
         *guard = value;
     }
-    load_gifs();
+    /* GIF feature disabled: no provider fetch. */
 }
 
 extern "C" fn on_gif_more() {
@@ -616,8 +633,8 @@ extern "C" fn on_gif_more() {
 }
 
 extern "C" fn on_gif_reload() {
-    append_log("gif rescan requested");
-    load_gifs();
+    /* GIF feature removed: nothing to rescan. */
+    append_log("gif disabled");
 }
 
 
@@ -662,7 +679,7 @@ fn timestamp() -> String {
     format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", y, m, d, secs / 3600, (secs % 3600) / 60, secs % 60)
 }
 
-fn append_log(message: &str) {
+pub(crate) fn append_log(message: &str) {
     use std::io::Write;
     let path = log_file();
     if let Some(dir) = path.parent() {
@@ -1063,7 +1080,6 @@ extern "C" fn on_primary_activated() {
     });
 
     unsafe { super_v_ui_clear_history_items(); }
-    load_gifs();
     let boot_cfg = load_settings();
     if let Ok(k) = CString::new(boot_cfg.gif_api_key) {
         unsafe { super_v_ui_set_api_key_text(k.as_ptr()); }
@@ -1177,6 +1193,7 @@ fn main() -> Result<()> {
         super_v_ui_set_refresh_hook(on_refresh_history);
         super_v_ui_set_live_update_hook(on_live_update);
         warm_glyph_index();
+        tools::init();
     }
 
     /* GTK rejects unknown options, so --hidden is consumed above. */

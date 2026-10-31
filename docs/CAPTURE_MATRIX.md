@@ -162,3 +162,53 @@ imports `text/uri-list` image references, and skips its own writes through
 | own paste | marker written, then `wl-copy` | 26 -> 26 rows, correctly skipped |
 
 Still open: `PRIMARY` selection (P3), wlroots `data-control` (P4), KDE (P6).
+
+---
+
+## 8. Snippets and AI assistant (replaces the GIF tab)
+
+The GIF tab was removed: every page decoded 24 GIFs up front (48 frames each) into
+memory that was never evicted, so paging grew the process by ~150 MB per page
+until the desktop thrashed. No GIF fetch, decode or paint path runs any more.
+
+Replacement tabs:
+
+| Tab | What it does | Storage |
+|---|---|---|
+| Snippet | reusable text, click to paste, add/delete in-app |  |
+| Tulis (AI) | prompt + presets (bahasa, gaya, format, target) -> text to copy or paste | none, stateless |
+
+AI provider resolution order:  -> 
+( = Anthropic, otherwise OpenAI-compatible) ->  ->
+ ->  ->  ->  CLI.
+
+Settings keys: , , , .
+Presets: bahasa (Auto/Indonesia/English), gaya (Sopan/Santai/Netral/Formal),
+format (Auto/Markdown/Teks biasa), target (Auto/Chat/Dokumen/Email). Target is
+also inferred from the prompt (whatsapp, telegram, pesan, markdown, email, surat).
+
+---
+
+## 8. Snippets and AI assistant (the GIF tab is gone)
+
+The GIF tab was removed. Every page decoded 24 GIFs up front (48 frames each,
+~1.3 MB per GIF) into a hash that was never cleared, so paging grew the process
+by ~150 MB per page until the desktop thrashed. No GIF fetch, decode or paint
+path runs any more: the resident overlay sits at ~80 MB, 12 threads, 0 giphy
+requests.
+
+| Tab | What it does | Storage |
+|---|---|---|
+| Snippet | reusable text, click to paste, add/delete in-app | `~/.config/super-v-clipboard/snippets.json` |
+| Tulis (AI) | prompt + presets, result can be copied or pasted | stateless |
+
+Provider resolution: `ai_provider` -> `ai_api_key` (`sk-ant...` = Anthropic,
+otherwise OpenAI-compatible HTTP) -> `ANTHROPIC_API_KEY` -> `OPENAI_API_KEY` ->
+`claude` -> `codex` -> `antigravity` CLI.
+
+Settings keys: `ai_provider`, `ai_model`, `ai_api_key`, `ai_base_url`.
+
+Presets: bahasa (Auto/Indonesia/English), gaya (Sopan/Santai/Netral/Formal),
+format (Auto/Markdown/Teks biasa), target (Auto/Chat/Dokumen/Email). The target
+is also inferred from the prompt: whatsapp/telegram/pesan -> chat, markdown/readme
+-> markdown, email/surat -> email.

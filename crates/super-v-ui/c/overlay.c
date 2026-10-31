@@ -90,6 +90,12 @@ static void sync_clipboard_once(void);
 static gboolean sync_clipboard_idle(gpointer data);
 static void request_pointer_placement(void);
 static void on_placement_changed(GObject *obj, GParamSpec *pspec, gpointer user_data);
+static void on_snippet_add_clicked(GtkButton *btn, gpointer data);
+static void on_snippet_row_activated(GtkListBox *box, GtkListBoxRow *row, gpointer data);
+static void on_ai_generate_clicked(GtkButton *btn, gpointer data);
+static void on_ai_copy_clicked(GtkButton *btn, gpointer data);
+static void on_ai_paste_clicked(GtkButton *btn, gpointer data);
+
 static void reload_glyphs(const char *tab);
 
 void super_v_ui_set_paste_callback(PasteCallback cb) { g_paste_cb = cb; }
@@ -1176,7 +1182,7 @@ static void on_tab_switched(GObject *obj, GParamSpec *pspec, gpointer user_data)
     } else if (strcmp(name, "symbols") == 0) {
         if (g_offset_symbol == 0) first_page("symbols");
     } else if (strcmp(name, "gif") == 0) {
-        gtk_flow_box_invalidate_filter(GTK_FLOW_BOX(g_gif_flow));
+        if (g_gif_flow) gtk_flow_box_invalidate_filter(GTK_FLOW_BOX(g_gif_flow));
         /* Pages are fetched asynchronously, so request the first one once. */
         if (!g_gif_requested) {
             g_gif_requested = TRUE;
@@ -1218,7 +1224,7 @@ static void on_search_changed(GtkSearchEntry *entry, gpointer user_data) {
         g_done_symbol = 0;
         first_page("symbols");
     } else if (strcmp(name, "gif") == 0) {
-        gtk_flow_box_invalidate_filter(GTK_FLOW_BOX(g_gif_flow));
+        if (g_gif_flow) gtk_flow_box_invalidate_filter(GTK_FLOW_BOX(g_gif_flow));
         g_strlcpy(g_gif_query, q, sizeof(g_gif_query));
         if (g_gif_search_source) g_source_remove(g_gif_search_source);
         g_gif_search_source = g_timeout_add(450, gif_search_fire, NULL);
@@ -1245,6 +1251,7 @@ void super_v_ui_add_gif_item(const char *path, const char *title) {
     g_object_set_data_full(G_OBJECT(btn), "super_v_gif_path", g_strdup(path), g_free);
     g_signal_connect_data(btn, "clicked", G_CALLBACK(on_gif_clicked),
         g_strdup(path), (GClosureNotify)free_closure_data, 0);
+    if (!g_gif_flow) return;
     gtk_flow_box_append(GTK_FLOW_BOX(g_gif_flow), btn);
 }
 
@@ -2170,6 +2177,12 @@ static void deliver_clip(gpointer data) {
         gif_clip_free);
     if (!g_gif_pending) g_gif_pending = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     if (ready->clip) {
+        if (g_getenv("SUPER_V_FPS_LOG")) {
+            int fw = ready->clip->n ? gdk_pixbuf_get_width(ready->clip->frames[0]) : 0;
+            int fh = ready->clip->n ? gdk_pixbuf_get_height(ready->clip->frames[0]) : 0;
+            g_printerr("CLIPMEM n=%d w=%d h=%d path=%s\n",
+                ready->clip->n, fw, fh, ready->path);
+        }
         GifClip *old = g_hash_table_lookup(g_gif_clips, ready->path);
         if (old) {
             gif_clip_free(old);
@@ -2492,6 +2505,7 @@ static gboolean gif_probe_round_cb(gpointer data);
  * page rounds. The stack ignores a switch made before it is on screen. */
 static gboolean gif_probe_begin(gpointer data) {
     (void)data;
+    if (!g_gif_flow) return G_SOURCE_REMOVE;   /* GIF tab removed */
     if (g_stack)
         adw_view_stack_set_visible_child_name(ADW_VIEW_STACK(g_stack), "gif");
     g_gif_probe_round = 0;
@@ -2581,9 +2595,11 @@ static gboolean run_selftest(gpointer data) {
     printf("VERIFY: search_english_ok=%d, hits=%d\n", en_hits > 0, en_hits);
 
     int gif_count = 0;
-    for (GtkWidget *w = gtk_widget_get_first_child(g_gif_flow); w; w = gtk_widget_get_next_sibling(w)) gif_count++;
+    if (g_gif_flow) {
+        for (GtkWidget *w = gtk_widget_get_first_child(g_gif_flow); w; w = gtk_widget_get_next_sibling(w)) gif_count++;
+    }
     printf("VERIFY: gif_items=%d, hint=%s\n", gif_count,
-        gtk_label_get_text(GTK_LABEL(g_gif_label)));
+        g_gif_label ? gtk_label_get_text(GTK_LABEL(g_gif_label)) : "disabled");
 
     apply_entry_text("");
     g_query_emoji[0] = 0;
@@ -2786,6 +2802,223 @@ static gboolean place_after_map(gpointer data) {
     return G_SOURCE_REMOVE;
 }
 
+/* ---- snippets and AI writing assistant ------------------------------- */
+static GtkWidget *g_snippet_list = NULL;
+static GtkWidget *g_ai_prompt = NULL;
+static GtkWidget *g_ai_result = NULL;
+static GtkWidget *g_ai_status = NULL;
+static GtkWidget *g_ai_lang = NULL;
+static GtkWidget *g_ai_tone = NULL;
+static GtkWidget *g_ai_format = NULL;
+static GtkWidget *g_ai_target = NULL;
+static GtkWidget *g_ai_presets = NULL;
+static SnippetAddHook g_snippet_add_hook = NULL;
+static SnippetDeleteHook g_snippet_delete_hook = NULL;
+static AiGenerateHook g_ai_generate_hook = NULL;
+
+static const char *g_ai_language_options[] = { "Auto", "Indonesia", "English", NULL };
+static const char *g_ai_tone_options[] = { "Sopan", "Santai", "Netral", "Formal", NULL };
+static const char *g_ai_format_options[] = { "Auto", "Markdown", "Teks biasa", NULL };
+static const char *g_ai_target_options[] = { "Auto", "Chat (WA/TG)", "Dokumen", "Email", NULL };
+
+void super_v_ui_set_snippet_hooks(SnippetAddHook add, SnippetDeleteHook del) {
+    g_snippet_add_hook = add;
+    g_snippet_delete_hook = del;
+}
+void super_v_ui_set_ai_generate_hook(AiGenerateHook cb) { g_ai_generate_hook = cb; }
+
+void super_v_ui_clear_snippet_rows(void) {
+    if (!g_snippet_list) return;
+    GtkWidget *child = gtk_widget_get_first_child(g_snippet_list);
+    while (child) {
+        GtkWidget *next = gtk_widget_get_next_sibling(child);
+        gtk_list_box_remove(GTK_LIST_BOX(g_snippet_list), child);
+        child = next;
+    }
+}
+
+static void on_snippet_delete_clicked(GtkButton *btn, gpointer data) {
+    (void)btn;
+    long long id = (long long)GPOINTER_TO_INT(data);
+    if (g_snippet_delete_hook) g_snippet_delete_hook(id);
+}
+
+void super_v_ui_add_snippet_row(const char *name, const char *body, long long id) {
+    if (!g_snippet_list || !name) return;
+    AdwActionRow *row = ADW_ACTION_ROW(adw_action_row_new());
+    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row), name);
+    char *preview = g_strdup(body ? body : "");
+    char *nl = strchr(preview, 0x0a);
+    if (nl) *nl = 0;
+    if (strlen(preview) > 60) preview[60] = 0;
+    adw_action_row_set_subtitle(row, preview);
+    g_free(preview);
+    g_object_set_data_full(G_OBJECT(row), "snippet-body", g_strdup(body ? body : ""), g_free);
+
+    GtkWidget *del = gtk_button_new_from_icon_name("user-trash-symbolic");
+    gtk_widget_add_css_class(del, "flat");
+    gtk_widget_set_valign(del, GTK_ALIGN_CENTER);
+    g_signal_connect(del, "clicked", G_CALLBACK(on_snippet_delete_clicked), GINT_TO_POINTER((int)id));
+    adw_action_row_add_suffix(row, del);
+
+    gtk_list_box_append(GTK_LIST_BOX(g_snippet_list), GTK_WIDGET(row));
+}
+
+static void on_snippet_row_activated(GtkListBox *box, GtkListBoxRow *row, gpointer data) {
+    (void)box; (void)data;
+    const char *body = g_object_get_data(G_OBJECT(row), "snippet-body");
+    if (body && *body) paste_after_hide(body);
+}
+
+typedef struct { GtkWidget *name; GtkWidget *body; AdwDialog *dialog; } SnippetDialog;
+
+static void on_snippet_save(GtkButton *btn, gpointer data) {
+    (void)btn;
+    SnippetDialog *dlg = data;
+    const char *name = gtk_editable_get_text(GTK_EDITABLE(dlg->name));
+    GtkTextBuffer *buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(dlg->body));
+    GtkTextIter s, e;
+    gtk_text_buffer_get_bounds(buf, &s, &e);
+    char *body = gtk_text_buffer_get_text(buf, &s, &e, FALSE);
+    if (name && *name && body && *body && g_snippet_add_hook) {
+        g_snippet_add_hook(name, body);
+        adw_dialog_close(dlg->dialog);
+    }
+    g_free(body);
+}
+
+static void on_snippet_add_clicked(GtkButton *btn, gpointer data) {
+    (void)btn; (void)data;
+    if (!g_main_window) return;
+    AdwDialog *dlg = adw_dialog_new();
+    adw_dialog_set_title(dlg, "Snippet baru");
+
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    gtk_widget_set_margin_start(box, 16);
+    gtk_widget_set_margin_end(box, 16);
+    gtk_widget_set_margin_top(box, 12);
+    gtk_widget_set_margin_bottom(box, 12);
+
+    GtkWidget *name = gtk_entry_new();
+    gtk_entry_set_placeholder_text(GTK_ENTRY(name), "Judul snippet");
+    gtk_box_append(GTK_BOX(box), name);
+
+    GtkWidget *body = gtk_text_view_new();
+    gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(body), GTK_WRAP_WORD_CHAR);
+    gtk_widget_set_size_request(body, 380, 160);
+    GtkWidget *frame = gtk_frame_new(NULL);
+    gtk_widget_add_css_class(frame, "card");
+    gtk_frame_set_child(GTK_FRAME(frame), body);
+    gtk_box_append(GTK_BOX(box), frame);
+
+    GtkWidget *actions = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_widget_set_halign(actions, GTK_ALIGN_END);
+    GtkWidget *cancel = gtk_button_new_with_label("Batal");
+    GtkWidget *save = gtk_button_new_with_label("Simpan");
+    gtk_widget_add_css_class(save, "suggested-action");
+    g_signal_connect_swapped(cancel, "clicked", G_CALLBACK(adw_dialog_close), dlg);
+    SnippetDialog *state = g_new0(SnippetDialog, 1);
+    state->name = name;
+    state->body = body;
+    state->dialog = dlg;
+    g_signal_connect(save, "clicked", G_CALLBACK(on_snippet_save), state);
+    gtk_box_append(GTK_BOX(actions), cancel);
+    gtk_box_append(GTK_BOX(actions), save);
+    gtk_box_append(GTK_BOX(box), actions);
+
+    adw_dialog_set_child(dlg, box);
+    adw_dialog_present(dlg, g_main_window);
+}
+
+static char *ai_result_text(void);
+static gboolean ai_test_run(gpointer data) {
+    (void)data;
+    const char *prompt = g_getenv("SUPER_V_SELFTEST_AI");
+    if (!prompt || !g_ai_prompt) return G_SOURCE_REMOVE;
+    GtkTextBuffer *buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(g_ai_prompt));
+    gtk_text_buffer_set_text(buf, prompt, -1);
+    on_ai_generate_clicked(NULL, NULL);
+    return G_SOURCE_REMOVE;
+}
+
+static gboolean ai_test_report(gpointer data) {
+    (void)data;
+    char *text = ai_result_text();
+    printf("VERIFY: ai_result_len=%zu text=%.60s\n", text ? strlen(text) : 0, text ? text : "");
+    fflush(stdout);
+    g_free(text);
+    return G_SOURCE_REMOVE;
+}
+
+static const char *dropdown_text(GtkWidget *dd) {
+    if (!dd) return "Auto";
+    guint idx = gtk_drop_down_get_selected(GTK_DROP_DOWN(dd));
+    GtkStringList *model = GTK_STRING_LIST(gtk_drop_down_get_model(GTK_DROP_DOWN(dd)));
+    const char *text = model ? gtk_string_list_get_string(model, idx) : NULL;
+    return text ? text : "Auto";
+}
+
+void super_v_ui_set_ai_result(const char *text) {
+    if (!g_ai_result) return;
+    GtkTextBuffer *buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(g_ai_result));
+    gtk_text_buffer_set_text(buf, text ? text : "", -1);
+    if (g_ai_status) gtk_label_set_text(GTK_LABEL(g_ai_status), "");
+}
+
+void super_v_ui_set_ai_status(const char *text) {
+    if (g_ai_status) gtk_label_set_text(GTK_LABEL(g_ai_status), text ? text : "");
+}
+
+static char *ai_result_text(void) {
+    if (!g_ai_result) return g_strdup("");
+    GtkTextBuffer *buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(g_ai_result));
+    GtkTextIter s, e;
+    gtk_text_buffer_get_bounds(buf, &s, &e);
+    return gtk_text_buffer_get_text(buf, &s, &e, FALSE);
+}
+
+static void on_ai_generate_clicked(GtkButton *btn, gpointer data) {
+    (void)btn; (void)data;
+    if (!g_ai_prompt) return;
+    GtkTextBuffer *buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(g_ai_prompt));
+    GtkTextIter s, e;
+    gtk_text_buffer_get_bounds(buf, &s, &e);
+    char *prompt = gtk_text_buffer_get_text(buf, &s, &e, FALSE);
+    if (!prompt || !*prompt) {
+        g_free(prompt);
+        super_v_ui_set_ai_status("Tulis dulu perintahnya");
+        return;
+    }
+    if (g_ai_generate_hook) {
+        super_v_ui_set_ai_status("menulis...");
+        g_ai_generate_hook(prompt, dropdown_text(g_ai_lang), dropdown_text(g_ai_tone),
+                           dropdown_text(g_ai_format), dropdown_text(g_ai_target));
+    } else {
+        super_v_ui_set_ai_status("AI belum siap");
+    }
+    g_free(prompt);
+}
+
+static void on_ai_copy_clicked(GtkButton *btn, gpointer data) {
+    (void)btn; (void)data;
+    char *text = ai_result_text();
+    if (text && *text) {
+        GdkDisplay *d = gdk_display_get_default();
+        if (d) {
+            mark_self_clipboard();
+            gdk_clipboard_set_text(gdk_display_get_clipboard(d), text);
+        }
+    }
+    g_free(text);
+}
+
+static void on_ai_paste_clicked(GtkButton *btn, gpointer data) {
+    (void)btn; (void)data;
+    char *text = ai_result_text();
+    if (text && *text) paste_after_hide(text);
+    g_free(text);
+}
+
 static GtkWidget *create_main_window(AdwApplication *app) {
     GtkWidget *window = adw_application_window_new(GTK_APPLICATION(app));
     gtk_window_set_title(GTK_WINDOW(window), "Super-V Clipboard");
@@ -2908,28 +3141,6 @@ static GtkWidget *create_main_window(AdwApplication *app) {
     g_signal_connect(emoji_scroll, "edge-reached", G_CALLBACK(on_scroll_edge), (gpointer)"emoji");
     adw_view_stack_add_titled_with_icon(ADW_VIEW_STACK(g_stack), emoji_scroll, "emoji", "Emoji", "face-smile-symbolic");
 
-    /* TAB 3: GIF */
-    GtkWidget *gif_scroll = gtk_scrolled_window_new();
-    GtkWidget *gif_container = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
-    gtk_widget_set_margin_start(gif_container, 10);
-    gtk_widget_set_margin_end(gif_container, 10);
-    gtk_widget_set_margin_top(gif_container, 6);
-
-    g_gif_label = gtk_label_new("Local GIF library");
-    gtk_widget_set_halign(g_gif_label, GTK_ALIGN_START);
-    gtk_widget_add_css_class(g_gif_label, "heading");
-    gtk_box_append(GTK_BOX(gif_container), g_gif_label);
-
-    g_gif_flow = gtk_flow_box_new();
-    gtk_flow_box_set_selection_mode(GTK_FLOW_BOX(g_gif_flow), GTK_SELECTION_NONE);
-    gtk_flow_box_set_max_children_per_line(GTK_FLOW_BOX(g_gif_flow), 4);
-    gtk_flow_box_set_filter_func(GTK_FLOW_BOX(g_gif_flow), (GtkFlowBoxFilterFunc)filter_gif_row, NULL, NULL);
-    gtk_box_append(GTK_BOX(gif_container), g_gif_flow);
-
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(gif_scroll), gif_container);
-    g_signal_connect(gif_scroll, "edge-reached", G_CALLBACK(on_gif_scroll_edge), NULL);
-    adw_view_stack_add_titled_with_icon(ADW_VIEW_STACK(g_stack), gif_scroll, "gif", "GIF", "media-optical-symbolic");
-
     /* TAB 4: symbols */
     GtkWidget *sym_scroll = gtk_scrolled_window_new();
     GtkWidget *sym_container = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
@@ -2952,6 +3163,101 @@ static GtkWidget *create_main_window(AdwApplication *app) {
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(sym_scroll), sym_container);
     g_signal_connect(sym_scroll, "edge-reached", G_CALLBACK(on_scroll_edge), (gpointer)"symbol");
     adw_view_stack_add_titled_with_icon(ADW_VIEW_STACK(g_stack), sym_scroll, "symbols", "Symbols", "accessories-character-map-symbolic");
+
+    /* TAB 4: snippets - reusable text, stored locally, pasted like history. */
+    GtkWidget *snip_scroll = gtk_scrolled_window_new();
+    GtkWidget *snip_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    gtk_widget_set_margin_start(snip_box, 10);
+    gtk_widget_set_margin_end(snip_box, 10);
+    gtk_widget_set_margin_top(snip_box, 8);
+
+    GtkWidget *snip_head = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    GtkWidget *snip_title = gtk_label_new("Snippets");
+    gtk_widget_add_css_class(snip_title, "heading");
+    gtk_widget_set_hexpand(snip_title, TRUE);
+    gtk_widget_set_halign(snip_title, GTK_ALIGN_START);
+    GtkWidget *snip_add = gtk_button_new_with_label("Baru");
+    gtk_widget_add_css_class(snip_add, "flat");
+    g_signal_connect(snip_add, "clicked", G_CALLBACK(on_snippet_add_clicked), NULL);
+    gtk_box_append(GTK_BOX(snip_head), snip_title);
+    gtk_box_append(GTK_BOX(snip_head), snip_add);
+    gtk_box_append(GTK_BOX(snip_box), snip_head);
+
+    g_snippet_list = gtk_list_box_new();
+    gtk_list_box_set_selection_mode(GTK_LIST_BOX(g_snippet_list), GTK_SELECTION_NONE);
+    g_signal_connect(g_snippet_list, "row-activated", G_CALLBACK(on_snippet_row_activated), NULL);
+    gtk_box_append(GTK_BOX(snip_box), g_snippet_list);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(snip_scroll), snip_box);
+    adw_view_stack_add_titled_with_icon(ADW_VIEW_STACK(g_stack), snip_scroll, "snippets", "Snippet", "folder-documents-symbolic");
+
+    /* TAB 5: AI writing assistant. */
+    GtkWidget *ai_scroll = gtk_scrolled_window_new();
+    GtkWidget *ai_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    gtk_widget_set_margin_start(ai_box, 10);
+    gtk_widget_set_margin_end(ai_box, 10);
+    gtk_widget_set_margin_top(ai_box, 8);
+
+    GtkWidget *ai_head = gtk_label_new("Tulis dengan AI");
+    gtk_widget_add_css_class(ai_head, "heading");
+    gtk_widget_set_halign(ai_head, GTK_ALIGN_START);
+    gtk_box_append(GTK_BOX(ai_box), ai_head);
+
+    g_ai_prompt = gtk_text_view_new();
+    gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(g_ai_prompt), GTK_WRAP_WORD_CHAR);
+    gtk_widget_set_size_request(g_ai_prompt, -1, 84);
+    GtkWidget *ai_prompt_frame = gtk_frame_new(NULL);
+    gtk_widget_add_css_class(ai_prompt_frame, "card");
+    gtk_frame_set_child(GTK_FRAME(ai_prompt_frame), g_ai_prompt);
+    gtk_box_append(GTK_BOX(ai_box), ai_prompt_frame);
+
+    g_ai_presets = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    g_ai_lang = gtk_drop_down_new_from_strings(g_ai_language_options);
+    g_ai_tone = gtk_drop_down_new_from_strings(g_ai_tone_options);
+    g_ai_format = gtk_drop_down_new_from_strings(g_ai_format_options);
+    g_ai_target = gtk_drop_down_new_from_strings(g_ai_target_options);
+    gtk_widget_set_hexpand(g_ai_lang, TRUE);
+    gtk_widget_set_hexpand(g_ai_tone, TRUE);
+    gtk_widget_set_hexpand(g_ai_format, TRUE);
+    gtk_widget_set_hexpand(g_ai_target, TRUE);
+    gtk_box_append(GTK_BOX(g_ai_presets), g_ai_lang);
+    gtk_box_append(GTK_BOX(g_ai_presets), g_ai_tone);
+    gtk_box_append(GTK_BOX(g_ai_presets), g_ai_format);
+    gtk_box_append(GTK_BOX(g_ai_presets), g_ai_target);
+    gtk_box_append(GTK_BOX(ai_box), g_ai_presets);
+
+    GtkWidget *ai_actions = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    GtkWidget *ai_run = gtk_button_new_with_label("Buat");
+    gtk_widget_add_css_class(ai_run, "suggested-action");
+    g_signal_connect(ai_run, "clicked", G_CALLBACK(on_ai_generate_clicked), NULL);
+    g_ai_status = gtk_label_new("");
+    gtk_widget_add_css_class(g_ai_status, "dim-label");
+    gtk_widget_set_hexpand(g_ai_status, TRUE);
+    gtk_widget_set_halign(g_ai_status, GTK_ALIGN_START);
+    gtk_box_append(GTK_BOX(ai_actions), ai_run);
+    gtk_box_append(GTK_BOX(ai_actions), g_ai_status);
+    gtk_box_append(GTK_BOX(ai_box), ai_actions);
+
+    g_ai_result = gtk_text_view_new();
+    gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(g_ai_result), GTK_WRAP_WORD_CHAR);
+    gtk_text_view_set_editable(GTK_TEXT_VIEW(g_ai_result), TRUE);
+    gtk_widget_set_size_request(g_ai_result, -1, 140);
+    GtkWidget *ai_result_frame = gtk_frame_new(NULL);
+    gtk_widget_add_css_class(ai_result_frame, "card");
+    gtk_frame_set_child(GTK_FRAME(ai_result_frame), g_ai_result);
+    gtk_box_append(GTK_BOX(ai_box), ai_result_frame);
+
+    GtkWidget *ai_result_actions = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    GtkWidget *ai_copy = gtk_button_new_with_label("Salin");
+    GtkWidget *ai_paste = gtk_button_new_with_label("Paste");
+    g_signal_connect(ai_copy, "clicked", G_CALLBACK(on_ai_copy_clicked), NULL);
+    g_signal_connect(ai_paste, "clicked", G_CALLBACK(on_ai_paste_clicked), NULL);
+    gtk_box_append(GTK_BOX(ai_result_actions), ai_copy);
+    gtk_box_append(GTK_BOX(ai_result_actions), ai_paste);
+    gtk_box_append(GTK_BOX(ai_box), ai_result_actions);
+
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(ai_scroll), ai_box);
+    adw_view_stack_add_titled_with_icon(ADW_VIEW_STACK(g_stack), ai_scroll, "ai", "Tulis", "x-office-document-symbolic");
+
 
     g_signal_connect(g_stack, "notify::visible-child-name", G_CALLBACK(on_tab_switched), NULL);
 
@@ -2981,6 +3287,10 @@ static void on_app_activate(GtkApplication *app, gpointer user_data) {
     g_timeout_add(200, sync_clipboard_idle, NULL);
 
     g_idle_add(run_activate_hook, NULL);
+    if (g_getenv("SUPER_V_SELFTEST_AI")) {
+        g_timeout_add(1500, ai_test_run, NULL);
+        g_timeout_add(6000, ai_test_report, NULL);
+    }
     if (g_start_hidden) {
         /* no window is shown yet; keep the warm process alive */
         g_application_hold(G_APPLICATION(app));
