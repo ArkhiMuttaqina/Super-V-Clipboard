@@ -22,6 +22,7 @@ type PlacementHook = extern "C" fn(mode: *const c_char);
 type ClipTextHook = extern "C" fn(text: *const c_char);
 type ImageHook = extern "C" fn(path: *const c_char, mime: *const c_char);
 type RefreshHook = extern "C" fn();
+type UpdateHook = extern "C" fn();
 
 #[allow(dead_code)]
 extern "C" {
@@ -44,6 +45,7 @@ extern "C" {
     fn super_v_ui_set_clipboard_hook(cb: ClipTextHook);
     fn super_v_ui_set_image_hook(cb: ImageHook);
     fn super_v_ui_set_refresh_hook(cb: RefreshHook);
+    fn super_v_ui_set_live_update_hook(cb: UpdateHook);
     fn super_v_ui_set_api_key_text(key: *const c_char);
     fn super_v_ui_report_provider_test(message: *const c_char);
     fn super_v_ui_set_log_path(path: *const c_char);
@@ -953,6 +955,61 @@ extern "C" fn on_delete_item(id: libc::c_longlong) {
 }
 
 /* Primary instance only: refresh live history from the daemon. */
+fn populate_history(items: Vec<super_v_core::ClipboardItem>) {
+    for item in items {
+        let title = item.text.unwrap_or_else(|| format!("[{}]", item.mime));
+        let subtitle = format!("{} \u{2022} {} B", item.category.as_str(), item.byte_size);
+        let c_title = CString::new(title.replace('\0', "")).unwrap_or_default();
+        let c_sub = CString::new(subtitle).unwrap_or_default();
+        let c_blob = CString::new(item.blob_path.unwrap_or_default()).unwrap_or_default();
+        let c_mime = CString::new(item.mime.clone()).unwrap_or_default();
+        unsafe {
+            super_v_ui_add_history_item(
+                c_title.as_ptr(), c_sub.as_ptr(),
+                if item.is_pinned { 1 } else { 0 },
+                if item.is_sensitive { 1 } else { 0 },
+                item.id.unwrap_or(0) as libc::c_longlong,
+                c_blob.as_ptr(),
+                item.created_at as libc::c_longlong,
+                c_mime.as_ptr(),
+            );
+        }
+    }
+}
+
+/// Newest id plus row count: cheap way to notice that the daemon stored something.
+fn history_signature(items: &[super_v_core::ClipboardItem]) -> (i64, usize) {
+    let top = items.first().and_then(|i| i.id).unwrap_or(0);
+    (top, items.len())
+}
+
+extern "C" fn on_live_update() {
+    use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+    static LAST_TOP: AtomicI64 = AtomicI64::new(-1);
+    static LAST_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(rt) => rt,
+        Err(_) => return,
+    };
+    let items = rt.block_on(async {
+        match super_v_core::ipc_client::IpcClient::connect(SOCKET).await {
+            Ok(mut client) => client.get_history(80).await.unwrap_or_default(),
+            Err(_) => Vec::new(),
+        }
+    });
+
+    let (top, count) = history_signature(&items);
+    if top == LAST_TOP.load(Ordering::Relaxed) && count == LAST_COUNT.load(Ordering::Relaxed) {
+        return;
+    }
+    LAST_TOP.store(top, Ordering::Relaxed);
+    LAST_COUNT.store(count, Ordering::Relaxed);
+
+    unsafe { super_v_ui_clear_history_items(); }
+    populate_history(items);
+}
+
 extern "C" fn on_primary_activated() {
     let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
         Ok(rt) => rt,
@@ -980,25 +1037,7 @@ extern "C" fn on_primary_activated() {
         let gif = CString::new(current_gif_provider()).unwrap_or_default();
         unsafe { super_v_ui_apply_preferences(langs.as_ptr(), gif.as_ptr()); }
     }
-    for item in items {
-        let title = item.text.unwrap_or_else(|| format!("[{}]", item.mime));
-        let subtitle = format!("{} \u{2022} {} B", item.category.as_str(), item.byte_size);
-        let c_title = CString::new(title.replace('\0', "")).unwrap_or_default();
-        let c_sub = CString::new(subtitle).unwrap_or_default();
-        let c_blob = CString::new(item.blob_path.unwrap_or_default()).unwrap_or_default();
-        let c_mime = CString::new(item.mime.clone()).unwrap_or_default();
-        unsafe {
-            super_v_ui_add_history_item(
-                c_title.as_ptr(), c_sub.as_ptr(),
-                if item.is_pinned { 1 } else { 0 },
-                if item.is_sensitive { 1 } else { 0 },
-                item.id.unwrap_or(0) as libc::c_longlong,
-                c_blob.as_ptr(),
-                item.created_at as libc::c_longlong,
-                c_mime.as_ptr(),
-            );
-        }
-    }
+    populate_history(items);
 }
 
 fn run_diagnostics_and_autofix() -> Result<()> {
@@ -1094,6 +1133,7 @@ fn main() -> Result<()> {
         super_v_ui_set_clipboard_hook(on_clipboard_text);
         super_v_ui_set_image_hook(on_clipboard_image);
         super_v_ui_set_refresh_hook(on_primary_activated);
+        super_v_ui_set_live_update_hook(on_live_update);
         warm_glyph_index();
     }
 

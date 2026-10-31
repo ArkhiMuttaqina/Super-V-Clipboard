@@ -36,6 +36,7 @@ static GtkWidget *g_gif_combo = NULL;
 static PasteCallback g_paste_cb = NULL;
 static PinCallback g_pin_cb = NULL;
 static RefreshHook g_refresh_hook = NULL;
+static UpdateHook g_live_update_hook = NULL;
 static DeleteCallback g_delete_cb = NULL;
 static GlyphProvider g_glyph_provider = NULL;
 static ActivateHook g_activate_hook = NULL;
@@ -91,6 +92,7 @@ static void reload_glyphs(const char *tab);
 void super_v_ui_set_paste_callback(PasteCallback cb) { g_paste_cb = cb; }
 void super_v_ui_set_pin_callback(PinCallback cb) { g_pin_cb = cb; }
 void super_v_ui_set_refresh_hook(RefreshHook cb) { g_refresh_hook = cb; }
+void super_v_ui_set_live_update_hook(UpdateHook cb) { g_live_update_hook = cb; }
 void super_v_ui_set_delete_callback(DeleteCallback cb) { g_delete_cb = cb; }
 void super_v_ui_set_glyph_provider(GlyphProvider cb) { g_glyph_provider = cb; }
 void super_v_ui_set_activate_hook(ActivateHook cb) { g_activate_hook = cb; }
@@ -2334,6 +2336,17 @@ static gboolean selftest_activate_row(gpointer data) {
     return G_SOURCE_REMOVE;
 }
 
+/* The daemon keeps capturing while the panel is open; without this the list
+ * would stay a snapshot until the next open. */
+static gboolean live_update_tick(gpointer data) {
+    (void)data;
+    if (!g_main_window || !gtk_widget_get_visible(g_main_window)) {
+        return G_SOURCE_CONTINUE;
+    }
+    if (g_live_update_hook) g_live_update_hook();
+    return G_SOURCE_CONTINUE;
+}
+
 static gboolean take_snapshot(gpointer data) {
     const char *path = (const char *)data;
     static gboolean tab_switched = FALSE;
@@ -2874,6 +2887,7 @@ static void on_app_activate(GtkApplication *app, gpointer user_data) {
     g_timeout_add(200, sync_clipboard_idle, NULL);
 
     if (g_activate_hook) g_activate_hook();
+    g_timeout_add(700, live_update_tick, NULL);
     if (g_getenv("SUPER_V_FPS_LOG") && g_main_window) {
         gtk_widget_set_visible(g_main_window, TRUE);
         gtk_window_present(GTK_WINDOW(g_main_window));
@@ -2889,7 +2903,10 @@ static void on_app_activate(GtkApplication *app, gpointer user_data) {
         gtk_widget_set_visible(g_main_window, FALSE);
     }
     if (g_getenv("SUPER_V_SNAPSHOT")) {
-        g_timeout_add(1200, take_snapshot, g_strdup(g_getenv("SUPER_V_SNAPSHOT")));
+        guint delay = 1200;
+        const char *d = g_getenv("SUPER_V_SNAPSHOT_DELAY_MS");
+        if (d) delay = (guint)g_ascii_strtoull(d, NULL, 10);
+        g_timeout_add(delay, take_snapshot, g_strdup(g_getenv("SUPER_V_SNAPSHOT")));
     }
 
     GdkClipboard *clip = gdk_display_get_clipboard(gdk_display_get_default());

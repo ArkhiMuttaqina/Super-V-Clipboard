@@ -8,6 +8,7 @@ extern "C" {
 typedef void (*PasteCallback)(long long id, const char *text);
 typedef void (*PinCallback)(long long id);
 typedef void (*RefreshHook)(void);
+typedef void (*UpdateHook)(void);
 typedef void (*DeleteCallback)(long long id);
 
 /* Lazy glyph provider. Fills rows [offset, offset+limit) for the given tab.
@@ -45,6 +46,7 @@ typedef void (*ImageHook)(const char *path, const char *mime);
 void super_v_ui_set_paste_callback(PasteCallback cb);
 void super_v_ui_set_pin_callback(PinCallback cb);
 void super_v_ui_set_refresh_hook(RefreshHook cb);
+void super_v_ui_set_live_update_hook(UpdateHook cb);
 void super_v_ui_set_delete_callback(DeleteCallback cb);
 void super_v_ui_set_glyph_provider(GlyphProvider cb);
 void super_v_ui_set_glyph_variants_provider(GlyphVariantsProvider cb);
