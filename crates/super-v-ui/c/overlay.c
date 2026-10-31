@@ -295,8 +295,11 @@ static GdkContentProvider *image_content_provider(const char *path, const char *
     if (n == 1) {
         all = providers[0];
     } else if (n > 1) {
+        /* The union takes ownership of the members: unreferencing them here
+         * left dangling providers inside the union and set_content crashed. */
         all = gdk_content_provider_new_union(providers, n);
-        for (int i = 0; i < n; i++) g_object_unref(providers[i]);
+        providers[0] = NULL;
+        providers[1] = NULL;
     }
     if (texture) g_object_unref(texture);
     return all;
