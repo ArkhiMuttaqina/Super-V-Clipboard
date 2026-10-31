@@ -27,6 +27,8 @@ install: build
 	mkdir -p $(HOME)/.config/systemd/user
 	install -m 644 data/super-v-clipboard.service $(HOME)/.config/systemd/user/super-v-clipboard.service
 	install -m 644 data/super-v-x11watch.service $(HOME)/.config/systemd/user/super-v-x11watch.service
+	mkdir -p $(HOME)/.config/autostart
+	install -m 644 data/super-v-ui-autostart.desktop $(HOME)/.config/autostart/super-v-ui.desktop
 	mkdir -p $(HOME)/.local/share/applications
 	install -m 644 data/super-v-clipboard.desktop $(HOME)/.local/share/applications/super-v-clipboard.desktop
 	@update-desktop-database $(HOME)/.local/share/applications 2>/dev/null || true
@@ -45,6 +47,7 @@ uninstall:
 	rm -f $(BINDIR)/super-v-daemon $(BINDIR)/super-v-ui $(BINDIR)/super-v-toggle $(BINDIR)/super-v-ingest $(BINDIR)/super-v-x11watch
 	rm -f $(HOME)/.config/systemd/user/super-v-clipboard.service
 	rm -f $(HOME)/.config/systemd/user/super-v-x11watch.service
+	rm -f $(HOME)/.config/autostart/super-v-ui.desktop
 	rm -f $(HOME)/.local/share/applications/super-v-clipboard.desktop
 	update-desktop-database $(HOME)/.local/share/applications 2>/dev/null || true
 

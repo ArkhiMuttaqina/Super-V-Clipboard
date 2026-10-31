@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Super V Clipboard Native (resident)
+Comment=Warm overlay so Super+V opens instantly
+Exec=super-v-ui --hidden
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+OnlyShowIn=GNOME;ubuntu:GNOME;

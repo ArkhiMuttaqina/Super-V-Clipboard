@@ -45,6 +45,7 @@ extern "C" {
     fn super_v_ui_set_clipboard_hook(cb: ClipTextHook);
     fn super_v_ui_set_image_hook(cb: ImageHook);
     fn super_v_ui_set_refresh_hook(cb: RefreshHook);
+    fn super_v_ui_set_start_hidden(hidden: c_int);
     fn super_v_ui_set_live_update_hook(cb: UpdateHook);
     fn super_v_ui_set_api_key_text(key: *const c_char);
     fn super_v_ui_report_provider_test(message: *const c_char);
@@ -920,12 +921,12 @@ extern "C" fn on_paste_selected(id: libc::c_longlong, text_ptr: *const c_char) {
     };
     ok.block_on(async {
         if let Ok(mut client) = super_v_core::ipc_client::IpcClient::connect(SOCKET).await {
+            /* id 0 with no text means the clipboard is already prepared (image or
+             * GIF paste); only the keystroke is missing. */
             let request = if id > 0 {
                 super_v_core::ipc::IpcRequest::PasteItem { id: id as i64 }
-            } else if glyph.is_some() {
-                super_v_core::ipc::IpcRequest::InjectPaste
             } else {
-                return;
+                super_v_core::ipc::IpcRequest::InjectPaste
             };
             let _ = client.send_request(&request).await;
         }
@@ -1006,6 +1007,21 @@ extern "C" fn on_live_update() {
     LAST_TOP.store(top, Ordering::Relaxed);
     LAST_COUNT.store(count, Ordering::Relaxed);
 
+    unsafe { super_v_ui_clear_history_items(); }
+    populate_history(items);
+}
+
+extern "C" fn on_refresh_history() {
+    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(rt) => rt,
+        Err(_) => return,
+    };
+    let items = rt.block_on(async {
+        match super_v_core::ipc_client::IpcClient::connect(SOCKET).await {
+            Ok(mut client) => client.get_history(80).await.unwrap_or_default(),
+            Err(_) => Vec::new(),
+        }
+    });
     unsafe { super_v_ui_clear_history_items(); }
     populate_history(items);
 }
@@ -1130,14 +1146,19 @@ fn main() -> Result<()> {
         super_v_ui_set_api_key_hook(on_api_key_changed);
         super_v_ui_set_provider_test_hook(on_provider_test);
         super_v_ui_set_placement_hook(on_placement_changed);
+        if std::env::args().any(|a| a == "--hidden") {
+            unsafe { super_v_ui_set_start_hidden(1) };
+        }
         super_v_ui_set_clipboard_hook(on_clipboard_text);
         super_v_ui_set_image_hook(on_clipboard_image);
-        super_v_ui_set_refresh_hook(on_primary_activated);
+        super_v_ui_set_refresh_hook(on_refresh_history);
         super_v_ui_set_live_update_hook(on_live_update);
         warm_glyph_index();
     }
 
-    let c_args: Vec<CString> = args.iter()
+    /* GTK rejects unknown options, so --hidden is consumed above. */
+    let forwarded: Vec<String> = args.iter().filter(|a| a.as_str() != "--hidden").cloned().collect();
+    let c_args: Vec<CString> = forwarded.iter()
         .map(|a| CString::new(a.as_str()).unwrap_or_default())
         .collect();
     let mut c_ptrs: Vec<*mut c_char> = c_args.iter().map(|a| a.as_ptr() as *mut c_char).collect();

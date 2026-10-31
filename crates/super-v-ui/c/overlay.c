@@ -9,11 +9,14 @@
 #include <malloc.h>
 
 #define GLYPH_PAGE 120
-#define IDLE_EXIT_SECONDS 180
+#define IDLE_EXIT_SECONDS 0
 #define EMOJI_CELL 46
 #define SYMBOL_CELL 44
 
 static GtkWidget *g_main_window = NULL;
+static gboolean g_start_hidden = FALSE;
+static gint64 g_show_start_us = 0;
+void super_v_ui_set_start_hidden(int hidden) { g_start_hidden = hidden != 0; }
 static GtkWidget *g_stack = NULL;
 static GtkWidget *g_clip_list = NULL;
 static GtkWidget *g_empty_label = NULL;
@@ -260,7 +263,7 @@ static GdkContentProvider *image_content_provider(const char *path, const char *
     if (had_texture) *had_texture = texture != NULL;
     if (had_gif) *had_gif = FALSE;
 
-    GdkContentProvider *providers[3];
+    GdkContentProvider *providers[2];
     int n = 0;
     gchar *data = NULL;
     gsize len = 0;
@@ -275,13 +278,17 @@ static GdkContentProvider *image_content_provider(const char *path, const char *
         providers[n++] = gdk_content_provider_new_typed(GDK_TYPE_TEXTURE, texture);
     }
     {
-        GFile *file = g_file_new_for_path(path);
-        if (file) {
-            GSList *list = g_slist_append(NULL, file);
-            GdkFileList *file_list = gdk_file_list_new_from_list(list);
-            if (file_list)
-                providers[n++] = gdk_content_provider_new_typed(GDK_TYPE_FILE_LIST, file_list);
-        }
+    /* GdkFileList has no serializer in this GTK build: adding it makes
+     * gdk_content_provider_ref_formats fail and the clipboard write is
+     * rejected outright, so only byte and texture providers are used. */
+
+    }
+
+    if (g_getenv("SUPER_V_DEBUG_CLIPBOARD")) {
+        for (int i = 0; i < n; i++)
+                        g_printerr("PROV[%d] valid=%d gtype=%s\n", i,
+                GDK_IS_CONTENT_PROVIDER(providers[i]),
+                G_OBJECT_TYPE_NAME(providers[i]));
     }
 
     GdkContentProvider *all = NULL;
@@ -1796,9 +1803,9 @@ static void schedule_idle_exit(void) {
     guint secs = IDLE_EXIT_SECONDS;
     const char *override = g_getenv("SUPER_V_IDLE_EXIT_SECONDS");
     if (override) {
-        int v = atoi(override);
-        if (v > 0) secs = (guint)v;
+        secs = (guint)MAX(0, atoi(override));
     }
+    if (secs == 0) return;   /* 0 = stay resident, instant Super+V */
     g_idle_exit_source = g_timeout_add_seconds(secs, idle_exit_cb, NULL);
 }
 
@@ -1912,6 +1919,7 @@ static void sync_clipboard_once(void) {
 }
 
 static gboolean on_toggle_signal(gpointer data) {
+    g_show_start_us = g_get_monotonic_time();
     (void)data;
     if (!g_main_window) return G_SOURCE_CONTINUE;
     if (gtk_widget_get_visible(g_main_window)) {
@@ -1920,9 +1928,9 @@ static gboolean on_toggle_signal(gpointer data) {
     }
     cancel_idle_exit();
     gtk_widget_set_visible(g_main_window, TRUE);
-    gtk_window_present(GTK_WINDOW(g_main_window));
-    g_timeout_add(60, place_after_map, NULL);
-    gtk_widget_grab_focus(g_search_entry);
+        gtk_window_present(GTK_WINDOW(g_main_window));
+        g_timeout_add(60, place_after_map, NULL);
+        gtk_widget_grab_focus(g_search_entry);
     if (g_stack && strcmp(adw_view_stack_get_visible_child_name(ADW_VIEW_STACK(g_stack)), "gif") == 0)
     refresh_bridge_status();
     g_timeout_add(200, sync_clipboard_idle, NULL);
@@ -2338,6 +2346,18 @@ static gboolean selftest_activate_row(gpointer data) {
 
 /* The daemon keeps capturing while the panel is open; without this the list
  * would stay a snapshot until the next open. */
+static gboolean image_paste_env(gpointer data) {
+    (void)data;
+    paste_file_after_hide(g_getenv("SUPER_V_IMAGE_PASTE_ON_SHOW"), NULL);
+    return G_SOURCE_REMOVE;
+}
+
+static gboolean run_activate_hook(gpointer data) {
+    (void)data;
+    if (g_activate_hook) g_activate_hook();
+    return G_SOURCE_REMOVE;
+}
+
 static gboolean live_update_tick(gpointer data) {
     (void)data;
     if (!g_main_window || !gtk_widget_get_visible(g_main_window)) {
@@ -2689,7 +2709,14 @@ static void on_placement_changed(GObject *obj, GParamSpec *pspec, gpointer user_
 }
 
 static gboolean place_after_map(gpointer data) {
+    if (g_getenv("SUPER_V_DEBUG_INSERT"))
+        g_printerr("SHOWN %" G_GINT64_FORMAT "\n",
+            (gint64)g_get_monotonic_time());
+
     (void)data;
+    if (g_getenv("SUPER_V_DEBUG_INSERT") && g_show_start_us) {
+        g_printerr("SHOW_DELTA %" G_GINT64_FORMAT "\n", g_get_monotonic_time() - g_show_start_us);
+    }
     request_pointer_placement();
     return G_SOURCE_REMOVE;
 }
@@ -2880,13 +2907,22 @@ static void on_app_activate(GtkApplication *app, gpointer user_data) {
     g_main_window = create_main_window(ADW_APPLICATION(app));
     if (g_main_window)
         gtk_widget_add_tick_callback(g_main_window, gif_frame_tick, NULL, NULL);
-    gtk_window_present(GTK_WINDOW(g_main_window));
-    g_timeout_add(60, place_after_map, NULL);
-    gtk_widget_grab_focus(g_search_entry);
-    refresh_bridge_status();
+    if (!g_start_hidden) {
+        gtk_window_present(GTK_WINDOW(g_main_window));
+        g_timeout_add(60, place_after_map, NULL);
+        gtk_widget_grab_focus(g_search_entry);
+        refresh_bridge_status();
+    }
     g_timeout_add(200, sync_clipboard_idle, NULL);
 
-    if (g_activate_hook) g_activate_hook();
+    g_idle_add(run_activate_hook, NULL);
+    if (g_start_hidden) {
+        /* no window is shown yet; keep the warm process alive */
+        g_application_hold(G_APPLICATION(app));
+    }
+    if (g_getenv("SUPER_V_IMAGE_PASTE_ON_SHOW")) {
+        g_timeout_add(1500, image_paste_env, NULL);
+    }   /* network + IPC must not delay the first frame */
     g_timeout_add(700, live_update_tick, NULL);
     if (g_getenv("SUPER_V_FPS_LOG") && g_main_window) {
         gtk_widget_set_visible(g_main_window, TRUE);
@@ -2901,6 +2937,11 @@ static void on_app_activate(GtkApplication *app, gpointer user_data) {
     if (g_getenv("SUPER_V_GIF_CLIP")) {
         super_v_ui_set_gif_clipboard(g_getenv("SUPER_V_GIF_CLIP"));
         gtk_widget_set_visible(g_main_window, FALSE);
+    }
+    if (g_getenv("SUPER_V_SELFTEST_IMAGE_PASTE")) {
+        printf("VERIFY: image_paste_path=true\n");
+        fflush(stdout);
+        paste_file_after_hide(g_getenv("SUPER_V_SELFTEST_IMAGE_PASTE"), NULL);
     }
     if (g_getenv("SUPER_V_SNAPSHOT")) {
         guint delay = 1200;
