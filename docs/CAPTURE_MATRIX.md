@@ -140,3 +140,25 @@ Evidence for the GAP rows (measured, overlay closed, service running):
 Ordering rationale: P1 and P2 unlock most real copy sources and are contained in
 one file (`crates/super-v-x11watch/c/x11watch.c`). P4 is the only structural
 addition (new protocol client). P3 is a behaviour change and therefore opt-in.
+
+---
+
+## 7. Verified after P1 + P2 (2026-10-31)
+
+`super-v-x11watch` now negotiates by probing candidate types, follows `INCR`,
+imports `text/uri-list` image references, and skips its own writes through
+`/tmp/super-v-clipboard-owned`.
+
+| Case | Command | Result |
+|---|---|---|
+| PNG | `wl-copy --type image/png < m_png.png` | row 715 `image/png` 155 B |
+| JPEG | `wl-copy --type image/jpeg < m_jpg.jpg` | row 716 `image/jpeg` 709 B |
+| WebP | `wl-copy --type image/webp < m_webp.webp` | row 717 `image/webp` 78 B |
+| GIF | `wl-copy --type image/gif < m_gif.gif` | row 718 `image/gif` 152 B |
+| BMP | `wl-copy --type image/bmp < m_bmp.bmp` | row 719 `image/bmp` 14454 B |
+| file copy | `wl-copy --type text/uri-list <<< file:///tmp/uri_only.png` | row 725 `image/png` 232 B |
+| 6 MB text | `wl-copy < t_big.txt` | row 713 `text/plain` 6,000,011 B |
+| text | `wl-copy <<< text` | row created |
+| own paste | marker written, then `wl-copy` | 26 -> 26 rows, correctly skipped |
+
+Still open: `PRIMARY` selection (P3), wlroots `data-control` (P4), KDE (P6).

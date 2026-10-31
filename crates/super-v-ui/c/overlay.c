@@ -76,6 +76,7 @@ static void select_combo(GtkWidget *combo, guint idx);
 static gboolean place_after_map(gpointer data);
 static void paste_after_hide(const char *text);
 static void refresh_bridge_status(void);
+static void mark_self_clipboard(void);
 typedef struct { char *text; } PasteAction;
 static gboolean do_paste_action(gpointer data);
 static void paste_image_after_hide(const char *path);
@@ -297,8 +298,15 @@ void super_v_ui_set_gif_clipboard(const char *path) {
     if (!d) return;
     GdkContentProvider *provider = image_content_provider(path, "image/gif", NULL, NULL);
     if (!provider) return;
+    mark_self_clipboard();
     gdk_clipboard_set_content(gdk_display_get_clipboard(d), provider);
     g_object_unref(provider);
+}
+
+/* The watcher sees every clipboard write; a marker keeps it from recording
+ * our own pastes as fresh copies. */
+static void mark_self_clipboard(void) {
+    g_file_set_contents("/tmp/super-v-clipboard-owned", "1", 1, NULL);
 }
 
 static void paste_file_after_hide(const char *path, const char *mime) {
@@ -313,6 +321,7 @@ static void paste_file_after_hide(const char *path, const char *mime) {
         g_object_unref(all);
         return;
     }
+    mark_self_clipboard();
     gdk_clipboard_set_content(gdk_display_get_clipboard(d), all);
     g_object_unref(all);
     hide_main_window();
@@ -708,6 +717,7 @@ static void on_clipboard_captured_for_paste(GObject *source, GAsyncResult *res, 
     GdkDisplay *d = gdk_display_get_default();
     if (d && action->text) {
         g_skip_change = TRUE;
+        mark_self_clipboard();
         gdk_clipboard_set_text(gdk_display_get_clipboard(d), action->text);
     }
 
