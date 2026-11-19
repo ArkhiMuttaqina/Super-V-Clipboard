@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <glib-unix.h>
+#include <glib/gstdio.h>
 #include <signal.h>
 #include <malloc.h>
 
@@ -21,6 +22,10 @@ static GtkWidget *g_stack = NULL;
 static GtkWidget *g_clip_list = NULL;
 static GtkWidget *g_empty_label = NULL;
 static GtkWidget *g_bridge_banner = NULL;
+static GtkWidget *g_bridge_banner_box = NULL;
+static GtkWidget *g_bridge_install_btn = NULL;
+static GtkWidget *g_ext_status_row = NULL;
+static GtkWidget *g_ext_install_btn = NULL;
 static GtkWidget *g_search_entry = NULL;
 static GtkWidget *g_emoji_flow = NULL;
 static GtkWidget *g_recent_emoji_flow = NULL;
@@ -105,6 +110,25 @@ static gboolean g_setting_entry = FALSE;
 static gboolean g_setting_combo = FALSE;
 static int g_placement_pointer = 0;
 static PlacementHook g_placement_hook = NULL;
+/* History Vanish: index into vanish_options(); 0 = never. */
+static guint g_vanish_idx = 0;
+static char g_vanish_mode[16] = "never";
+static PlacementHook g_vanish_hook = NULL;
+static ActivateHook g_clear_all_hook = NULL;
+
+/* Hours each combo entry keeps history; 0 means keep forever. */
+static const long vanish_hours[] = { 0, 1, 6, 24, 72, 168, 720 };
+static const char *vanish_labels[] = {
+    "Never", "1 hour", "6 hours", "1 day", "3 days", "7 days", "30 days", NULL
+};
+
+static guint vanish_index_for(const char *mode) {
+    if (!mode || !*mode || strcmp(mode, "never") == 0 || strcmp(mode, "0") == 0) return 0;
+    long hours = strtol(mode, NULL, 10);
+    for (guint i = 1; i < G_N_ELEMENTS(vanish_hours); i++)
+        if (vanish_hours[i] == hours) return i;
+    return 0;
+}
 
 static void hide_main_window(void);
 static void cancel_idle_exit(void);
@@ -116,6 +140,9 @@ static void select_combo(GtkWidget *combo, guint idx);
 static gboolean place_after_map(gpointer data);
 static void paste_after_hide(const char *text);
 static void refresh_bridge_status(void);
+static gboolean extension_installed(void);
+static void install_extension(void);
+static void on_install_extension_clicked(GtkButton *btn, gpointer data);
 static void mark_self_clipboard(void);
 typedef struct { char *text; } PasteAction;
 static gboolean do_paste_action(gpointer data);
@@ -126,6 +153,8 @@ static void sync_clipboard_once(void);
 static gboolean sync_clipboard_idle(gpointer data);
 static void request_pointer_placement(void);
 static void on_placement_changed(GObject *obj, GParamSpec *pspec, gpointer user_data);
+static void on_vanish_changed(GObject *obj, GParamSpec *pspec, gpointer user_data);
+static void on_clear_all_clicked(GtkButton *btn, gpointer user_data);
 static void on_snippet_add_clicked(GtkButton *btn, gpointer data);
 static void on_snippet_row_activated(GtkListBox *box, GtkListBoxRow *row, gpointer data);
 static void on_ai_generate_clicked(GtkButton *btn, gpointer data);
@@ -169,6 +198,12 @@ void super_v_ui_post_to_main(MainTaskFn fn, void *data) {
 void super_v_ui_set_api_key_hook(ApiKeyHook cb) { g_api_key_hook = cb; }
 void super_v_ui_set_provider_test_hook(ProviderTestHook cb) { g_provider_test_hook = cb; }
 void super_v_ui_set_placement_hook(PlacementHook cb) { g_placement_hook = cb; }
+void super_v_ui_set_vanish_hook(PlacementHook cb) { g_vanish_hook = cb; }
+void super_v_ui_set_clear_all_hook(ActivateHook cb) { g_clear_all_hook = cb; }
+void super_v_ui_set_vanish(const char *mode) {
+    g_snprintf(g_vanish_mode, sizeof g_vanish_mode, "%s", mode && *mode ? mode : "never");
+    g_vanish_idx = vanish_index_for(g_vanish_mode);
+}
 
 static void free_closure_data(gpointer data, GClosure *closure) { (void)closure; g_free(data); }
 
@@ -1724,6 +1759,29 @@ void super_v_ui_show_settings(void *parent_window) {
     adw_combo_row_set_model(ADW_COMBO_ROW(sort_row), G_LIST_MODEL(gtk_string_list_new(sort_options)));
     adw_preferences_group_add(sort_group, sort_row);
 
+    AdwPreferencesGroup *history_group = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
+    adw_preferences_group_set_title(history_group, "History");
+    adw_preferences_group_set_description(history_group,
+        "How long entries stay. Pinned items are never removed by the timer.");
+    adw_preferences_page_add(page, history_group);
+
+    GtkWidget *vanish_row = adw_combo_row_new();
+    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(vanish_row), "Vanish history after");
+    adw_combo_row_set_model(ADW_COMBO_ROW(vanish_row), G_LIST_MODEL(gtk_string_list_new(vanish_labels)));
+    adw_combo_row_set_selected(ADW_COMBO_ROW(vanish_row), g_vanish_idx);
+    g_signal_connect(vanish_row, "notify::selected", G_CALLBACK(on_vanish_changed), NULL);
+    adw_preferences_group_add(history_group, vanish_row);
+
+    GtkWidget *clear_row = adw_action_row_new();
+    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(clear_row), "Delete all history");
+    adw_action_row_set_subtitle(ADW_ACTION_ROW(clear_row), "Removes every entry, pinned included");
+    GtkWidget *clear_btn = gtk_button_new_with_label("Delete All");
+    gtk_widget_add_css_class(clear_btn, "destructive-action");
+    gtk_widget_set_valign(clear_btn, GTK_ALIGN_CENTER);
+    g_signal_connect(clear_btn, "clicked", G_CALLBACK(on_clear_all_clicked), NULL);
+    adw_action_row_add_suffix(ADW_ACTION_ROW(clear_row), clear_btn);
+    adw_preferences_group_add(history_group, clear_row);
+
     AdwPreferencesGroup *app_group = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
     adw_preferences_group_set_title(app_group, "Application");
     adw_preferences_page_add(page, app_group);
@@ -1747,6 +1805,26 @@ void super_v_ui_show_settings(void *parent_window) {
     g_signal_connect(debug_btn2, "clicked", G_CALLBACK(on_debug_clicked), NULL);
     adw_action_row_add_suffix(ADW_ACTION_ROW(debug_row2), debug_btn2);
     adw_preferences_group_add(app_group, debug_row2);
+
+    AdwPreferencesGroup *ext_group = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
+    adw_preferences_group_set_title(ext_group, "GNOME Extension");
+    adw_preferences_group_set_description(ext_group,
+        "The Super-V Bridge extension moves the window, injects paste and watches the clipboard on Wayland.");
+    adw_preferences_page_add(page, ext_group);
+
+    g_ext_status_row = adw_action_row_new();
+    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(g_ext_status_row),
+        extension_installed() ? "Installed" : "Not installed");
+    adw_action_row_set_subtitle(ADW_ACTION_ROW(g_ext_status_row),
+        extension_installed()
+            ? "super-v-bridge@arkhimuttaqina.my.id"
+            : "Install the bridge so pasting and capture work on Wayland");
+    g_ext_install_btn = gtk_button_new_with_label(extension_installed() ? "Reinstall" : "Install");
+    gtk_widget_add_css_class(g_ext_install_btn, "flat");
+    gtk_widget_set_valign(g_ext_install_btn, GTK_ALIGN_CENTER);
+    g_signal_connect(g_ext_install_btn, "clicked", G_CALLBACK(on_install_extension_clicked), NULL);
+    adw_action_row_add_suffix(ADW_ACTION_ROW(g_ext_status_row), g_ext_install_btn);
+    adw_preferences_group_add(ext_group, g_ext_status_row);
 
     AdwPreferencesGroup *win_group = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
     adw_preferences_group_set_title(win_group, "Window");
@@ -2063,27 +2141,122 @@ static GdkPixbuf *fit_pixbuf(GdkPixbuf *src, int size) {
     return gdk_pixbuf_scale_simple(src, target_w, target_h, GDK_INTERP_BILINEAR);
 }
 
-static void image_set_fitted(GtkWidget *img, GdkPixbuf *frame, int size) {
-    if (!frame) return;
-    GdkPixbuf *fit = fit_pixbuf(frame, size);
-    if (!fit) return;
-    gtk_image_set_from_pixbuf(GTK_IMAGE(img), fit);
-    g_object_unref(fit);
+/* History image thumbnails. The row thumbnail used to be decoded at full size
+ * on the GTK main thread, once per rebuild. The history is rebuilt on every
+ * clipboard change, and live_update_tick re-renders once a second while the
+ * Clipboard tab is open, so that cost landed on the main thread again and
+ * again: 25 images in one page measured 754 ms of blocked main thread plus
+ * 103 MB of throwaway RGBA. While the machine swaps, the frame clock starves
+ * and the Shell calls the window unresponsive. Decode off the main thread, at
+ * most THUMB_WORKERS at a time (the shape the GIF cells already use), and keep
+ * the fitted result: blobs are content-addressed by sha256, so a path always
+ * holds the same pixels and a cache entry can never go stale. */
+#define THUMB_WORKERS 3
+#define THUMB_CACHE_MAX 512
+
+static GHashTable *g_thumb_cache = NULL;   /* "size|path" -> fitted GdkPixbuf */
+static GMutex g_thumb_gate;
+static GCond g_thumb_cond;
+static int g_thumb_active = 0;
+
+typedef struct {
+    char *path;
+    int size;
+    GtkWidget *img;
+} ThumbJob;
+
+typedef struct {
+    char *key;
+    GdkPixbuf *pix;
+    GtkWidget *img;
+} ThumbReady;
+
+static char *thumb_cache_key(const char *path, int size) {
+    return g_strdup_printf("%d|%s", size, path);
+}
+
+static void deliver_thumb(gpointer data) {
+    ThumbReady *ready = data;
+    if (!g_thumb_cache) {
+        g_thumb_cache = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_object_unref);
+    }
+    if (ready->pix) {
+        if (g_hash_table_size(g_thumb_cache) >= THUMB_CACHE_MAX) {
+            g_hash_table_remove_all(g_thumb_cache);
+        }
+        g_hash_table_insert(g_thumb_cache, g_strdup(ready->key), ready->pix);
+    }
+    if (g_getenv("SUPER_V_DEBUG_THUMBS")) {
+        g_printerr("THUMB %s %s\n", ready->pix ? "decoded" : "failed", ready->key);
+    }
+    if (ready->img) {
+        /* already fitted by the worker; the row was ref'd for exactly this */
+        if (ready->pix) gtk_image_set_from_pixbuf(GTK_IMAGE(ready->img), ready->pix);
+        g_object_unref(ready->img);
+    }
+    g_free(ready->key);
+    g_free(ready);
+}
+
+static gpointer thumb_worker(gpointer data) {
+    ThumbJob *job = data;
+
+    g_mutex_lock(&g_thumb_gate);
+    while (g_thumb_active >= THUMB_WORKERS) g_cond_wait(&g_thumb_cond, &g_thumb_gate);
+    g_thumb_active++;
+    g_mutex_unlock(&g_thumb_gate);
+
+    GError *err = NULL;
+    GdkPixbuf *src = gdk_pixbuf_new_from_file(job->path, &err);
+    if (err) {
+        g_error_free(err);
+        err = NULL;
+    }
+
+    g_mutex_lock(&g_thumb_gate);
+    g_thumb_active--;
+    g_cond_signal(&g_thumb_cond);
+    g_mutex_unlock(&g_thumb_gate);
+
+    ThumbReady *ready = g_new0(ThumbReady, 1);
+    ready->key = thumb_cache_key(job->path, job->size);
+    ready->img = job->img;
+    if (src) {
+        ready->pix = fit_pixbuf(src, job->size);
+        g_object_unref(src);
+    }
+    g_free(job->path);
+    g_free(job);
+    super_v_ui_post_to_main(deliver_thumb, ready);
+    return NULL;
 }
 
 static GtkWidget *make_thumb(const char *path, int size) {
-    GError *err = NULL;
-    GdkPixbuf *src = gdk_pixbuf_new_from_file(path, &err);
-    if (!src) {
-        if (err) g_error_free(err);
-        return NULL;
-    }
     GtkWidget *img = gtk_image_new();
-    image_set_fitted(img, src, size);
-    g_object_unref(src);
     gtk_widget_set_size_request(img, size, size);
     gtk_widget_set_halign(img, GTK_ALIGN_CENTER);
     gtk_widget_set_valign(img, GTK_ALIGN_CENTER);
+    if (!path || !*path) return img;
+
+    char *key = thumb_cache_key(path, size);
+    GdkPixbuf *cached = g_thumb_cache ? g_hash_table_lookup(g_thumb_cache, key) : NULL;
+    if (cached) {
+        gtk_image_set_from_pixbuf(GTK_IMAGE(img), cached);
+        if (g_getenv("SUPER_V_DEBUG_THUMBS")) g_printerr("THUMB hit %s\n", key);
+        g_free(key);
+        return img;
+    }
+    if (g_getenv("SUPER_V_DEBUG_THUMBS")) g_printerr("THUMB queue %s\n", key);
+    g_free(key);
+
+    ThumbJob *job = g_new0(ThumbJob, 1);
+    job->path = g_strdup(path);
+    job->size = size;
+    /* The decode outlives the row: hold the image so a list rebuild cannot
+       free it while a worker is still running. */
+    job->img = (GtkWidget *)g_object_ref(img);
+    GThread *thread = g_thread_new("sv-thumb", thumb_worker, job);
+    g_thread_unref(thread);
     return img;
 }
 
@@ -2801,32 +2974,100 @@ static void on_move_window_reply(GObject *source, GAsyncResult *res, gpointer da
     }
 }
 
+extern const char *super_v_ui_extension_uuid(void);
+extern const char *super_v_ui_extension_metadata(void);
+extern const char *super_v_ui_extension_script(void);
+
+static char *extension_dir(void) {
+    return g_build_filename(g_get_home_dir(), ".local", "share",
+        "gnome-shell", "extensions", super_v_ui_extension_uuid(), NULL);
+}
+
+static gboolean extension_installed(void) {
+    char *dir = extension_dir();
+    char *entry = g_build_filename(dir, "extension.js", NULL);
+    gboolean ok = g_file_test(entry, G_FILE_TEST_IS_REGULAR);
+    g_free(entry);
+    g_free(dir);
+    return ok;
+}
+
+/* Copy the embedded bridge into the GNOME extensions dir and ask the running
+ * shell to load it. Activated after the next login on Wayland. */
+static void install_extension(void) {
+    const char *uuid = super_v_ui_extension_uuid();
+    const char *metadata = super_v_ui_extension_metadata();
+    const char *script = super_v_ui_extension_script();
+    char *dir = extension_dir();
+    g_mkdir_with_parents(dir, 0755);
+    char *m_path = g_build_filename(dir, "metadata.json", NULL);
+    char *j_path = g_build_filename(dir, "extension.js", NULL);
+    gboolean ok = g_file_set_contents(m_path, metadata, -1, NULL) &&
+                  g_file_set_contents(j_path, script, -1, NULL);
+    g_free(m_path);
+    g_free(j_path);
+    g_free(dir);
+    if (ok) {
+        char *cmd = g_strdup_printf("gnome-extensions enable %s", uuid);
+        g_spawn_command_line_async(cmd, NULL);
+        g_free(cmd);
+    }
+    refresh_bridge_status();
+    if (g_ext_status_row) {
+        adw_preferences_row_set_title(ADW_PREFERENCES_ROW(g_ext_status_row),
+            ok ? "Installed" : "Install failed");
+        adw_action_row_set_subtitle(ADW_ACTION_ROW(g_ext_status_row),
+            ok ? "Log out and back in to activate" : "Check the log for details");
+        gtk_widget_set_sensitive(GTK_WIDGET(g_ext_install_btn), FALSE);
+    }
+    if (g_getenv("SUPER_V_DEBUG_INSERT"))
+        g_printerr("EXTENSION install %s\n", ok ? "ok" : "failed");
+}
+
+static void on_install_extension_clicked(GtkButton *btn, gpointer data) {
+    (void)btn;
+    (void)data;
+    install_extension();
+}
+
 static void refresh_bridge_status(void) {
-    if (!g_bridge_banner) return;
+    if (!g_bridge_banner_box) return;
+    gboolean installed = extension_installed();
+    gboolean present = FALSE;
+
     GError *err = NULL;
     GDBusConnection *bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, &err);
-    if (!bus) {
-        if (err) g_error_free(err);
-        gtk_widget_set_visible(g_bridge_banner, TRUE);
-        return;
-    }
-    GVariant *reply = g_dbus_connection_call_sync(bus,
-        "org.freedesktop.DBus", "/org/freedesktop/DBus",
-        "org.freedesktop.DBus", "NameHasOwner",
-        g_variant_new("(s)", "my.id.arkhimuttaqina.Bridge"),
-        G_VARIANT_TYPE("(b)"), G_DBUS_CALL_FLAGS_NONE, 300, NULL, &err);
-    gboolean present = FALSE;
-    if (reply) {
-        gboolean owned = FALSE;
-        g_variant_get(reply, "(b)", &owned);
-        present = owned;
-        g_variant_unref(reply);
+    if (bus) {
+        GVariant *reply = g_dbus_connection_call_sync(bus,
+            "org.freedesktop.DBus", "/org/freedesktop/DBus",
+            "org.freedesktop.DBus", "NameHasOwner",
+            g_variant_new("(s)", "my.id.arkhimuttaqina.Bridge"),
+            G_VARIANT_TYPE("(b)"), G_DBUS_CALL_FLAGS_NONE, 300, NULL, &err);
+        if (reply) {
+            gboolean owned = FALSE;
+            g_variant_get(reply, "(b)", &owned);
+            present = owned;
+            g_variant_unref(reply);
+        } else if (err) {
+            g_error_free(err);
+        }
+        g_object_unref(bus);
     } else if (err) {
         g_error_free(err);
     }
-    gtk_widget_set_visible(g_bridge_banner, !present);
-    if (g_getenv("SUPER_V_DEBUG_INSERT")) g_printerr("BRIDGE present=%d\n", present);
-    g_object_unref(bus);
+
+    if (present) {
+        gtk_widget_set_visible(g_bridge_banner_box, FALSE);
+        gtk_widget_set_visible(g_bridge_install_btn, FALSE);
+    } else {
+        gtk_widget_set_visible(g_bridge_banner_box, TRUE);
+        gtk_widget_set_visible(g_bridge_install_btn, !installed);
+        gtk_label_set_text(GTK_LABEL(g_bridge_banner), installed
+            ? "GNOME extension Super-V Bridge is installed but not connected — enable it in Extensions, then log out and back in."
+            : "GNOME extension Super-V Bridge is not installed — pasting and clipboard capture are limited.");
+    }
+    if (g_getenv("SUPER_V_DEBUG_INSERT"))
+        g_printerr("BRIDGE present=%d installed=%d\n", present, installed);
 }
 
 static void request_pointer_placement(void) {
@@ -2868,6 +3109,50 @@ static void on_placement_changed(GObject *obj, GParamSpec *pspec, gpointer user_
     g_placement_pointer = (idx == 1);
     if (g_placement_hook) g_placement_hook(mode);
     request_pointer_placement();
+}
+
+static void on_vanish_changed(GObject *obj, GParamSpec *pspec, gpointer user_data) {
+    (void)pspec; (void)user_data;
+    if (g_setting_combo) return;
+    guint idx = adw_combo_row_get_selected(ADW_COMBO_ROW(obj));
+    if (idx >= G_N_ELEMENTS(vanish_hours)) idx = 0;
+    g_vanish_idx = idx;
+    if (idx == 0) {
+        g_snprintf(g_vanish_mode, sizeof g_vanish_mode, "never");
+    } else {
+        g_snprintf(g_vanish_mode, sizeof g_vanish_mode, "%ld", vanish_hours[idx]);
+    }
+    if (g_vanish_hook) g_vanish_hook(g_vanish_mode);
+}
+
+typedef struct {
+    AdwAlertDialog *dialog;
+    ActivateHook hook;
+} ConfirmClosure;
+
+static void on_clear_all_chosen(GObject *source, GAsyncResult *result, gpointer user_data) {
+    ConfirmClosure *cc = user_data;
+    const char *picked = adw_alert_dialog_choose_finish(ADW_ALERT_DIALOG(source), result);
+    if (cc->hook && picked && strcmp(picked, "delete") == 0) cc->hook();
+    g_object_unref(cc->dialog);
+    g_free(cc);
+}
+
+/* "Delete All" is irreversible, so it asks first. */
+static void on_clear_all_clicked(GtkButton *btn, gpointer user_data) {
+    (void)btn; (void)user_data;
+    AdwAlertDialog *dlg = ADW_ALERT_DIALOG(adw_alert_dialog_new(
+        "Delete all clipboard history?",
+        "Every row, pinned ones included, and its blob on disk is removed. This cannot be undone."));
+    adw_alert_dialog_add_response(dlg, "cancel", "Cancel");
+    adw_alert_dialog_add_response(dlg, "delete", "Delete All");
+    adw_alert_dialog_set_response_appearance(dlg, "delete", ADW_RESPONSE_DESTRUCTIVE);
+
+    ConfirmClosure *cc = g_new0(ConfirmClosure, 1);
+    cc->dialog = dlg;
+    cc->hook = g_clear_all_hook;
+
+    adw_alert_dialog_choose(dlg, GTK_WIDGET(g_main_window), NULL, on_clear_all_chosen, cc);
 }
 
 static gboolean place_after_map(gpointer data) {
@@ -3491,15 +3776,28 @@ static GtkWidget *create_main_window(AdwApplication *app) {
     gtk_box_append(GTK_BOX(main_box), g_search_entry);
 
     /* Bridge status: paste and capture need the GNOME extension. */
-    g_bridge_banner = gtk_label_new("GNOME extension Super-V Bridge is not installed or not connected — pasting and clipboard capture are limited.\nInstall it and log in again, or run super-v-ui --check.");
+    g_bridge_banner_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+    gtk_widget_set_margin_start(g_bridge_banner_box, 12);
+    gtk_widget_set_margin_end(g_bridge_banner_box, 12);
+    gtk_widget_set_margin_bottom(g_bridge_banner_box, 8);
+    gtk_widget_add_css_class(g_bridge_banner_box, "warning-banner");
+    gtk_widget_set_halign(g_bridge_banner_box, GTK_ALIGN_FILL);
+    gtk_widget_set_visible(g_bridge_banner_box, FALSE);
+
+    g_bridge_banner = gtk_label_new("GNOME extension Super-V Bridge is not installed — pasting and clipboard capture are limited.");
     gtk_label_set_wrap(GTK_LABEL(g_bridge_banner), TRUE);
-    gtk_widget_set_margin_start(g_bridge_banner, 12);
-    gtk_widget_set_margin_end(g_bridge_banner, 12);
-    gtk_widget_set_margin_bottom(g_bridge_banner, 8);
-    gtk_widget_add_css_class(g_bridge_banner, "warning-banner");
+    gtk_label_set_xalign(GTK_LABEL(g_bridge_banner), 0.0f);
     gtk_widget_set_halign(g_bridge_banner, GTK_ALIGN_FILL);
-    gtk_widget_set_visible(g_bridge_banner, FALSE);
-    gtk_box_append(GTK_BOX(main_box), g_bridge_banner);
+    gtk_box_append(GTK_BOX(g_bridge_banner_box), g_bridge_banner);
+
+    g_bridge_install_btn = gtk_button_new_with_label("Install GNOME extension");
+    gtk_widget_add_css_class(g_bridge_install_btn, "suggested-action");
+    gtk_widget_set_halign(g_bridge_install_btn, GTK_ALIGN_START);
+    gtk_widget_set_visible(g_bridge_install_btn, FALSE);
+    g_signal_connect(g_bridge_install_btn, "clicked", G_CALLBACK(on_install_extension_clicked), NULL);
+    gtk_box_append(GTK_BOX(g_bridge_banner_box), g_bridge_install_btn);
+
+    gtk_box_append(GTK_BOX(main_box), g_bridge_banner_box);
 
     gtk_box_append(GTK_BOX(main_box), g_stack);
 

@@ -65,6 +65,15 @@ pub struct Database {
 impl Database {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let conn = Connection::open(path)?;
+        // Durability is irrelevant for a clipboard; speed and lock robustness are.
+        // WAL lets concurrent IPC readers in while the daemon holds a writer,
+        // busy_timeout stops "database is locked" errors under bursty copies.
+        // pragma_update() runs the statement through execute(), and setting
+        // journal_mode returns a row, which execute() rejects. query_row is
+        // the correct call for a pragma that answers.
+        let _: String = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))?;
+        conn.pragma_update(None, "synchronous", "OFF")?;
+        conn.busy_timeout(std::time::Duration::from_secs(2))?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS entries (
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -189,6 +198,13 @@ impl Database {
     }
 
     pub fn delete_entry(&mut self, id: i64) -> Result<()> {
+        let blob: Option<Option<String>> = self
+            .conn
+            .query_row("SELECT blob_path FROM entries WHERE id = ?1", params![id], |r| r.get(0))
+            .ok();
+        if let Some(Some(path)) = blob {
+            let _ = std::fs::remove_file(path);
+        }
         self.conn.execute("DELETE FROM entries WHERE id = ?1", params![id])?;
         Ok(())
     }
@@ -196,6 +212,40 @@ impl Database {
     pub fn clear_unpinned(&mut self) -> Result<usize> {
         let count = self.conn.execute("DELETE FROM entries WHERE is_pinned = 0", [])?;
         Ok(count)
+    }
+
+    /// Delete every row (including pinned) plus its blob files.
+    pub fn clear_all(&mut self) -> Result<usize> {
+        let blobs: Vec<Option<String>> = {
+            let mut stmt = self.conn.prepare("SELECT blob_path FROM entries")?;
+            let rows = stmt.query_map([], |r| r.get(0))?;
+            rows.filter_map(|res| res.ok()).collect()
+        };
+        for path in blobs.into_iter().flatten() {
+            let _ = std::fs::remove_file(path);
+        }
+        let count = self.conn.execute("DELETE FROM entries", [])?;
+        Ok(count)
+    }
+
+    /// Drop rows created before `cutoff` (unix seconds) unless pinned,
+    /// cleaning up their blobs. Implements the History Vanish timer.
+    pub fn purge_older_than(&mut self, cutoff: i64) -> Result<usize> {
+        let doomed: Vec<(i64, Option<String>)> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, blob_path FROM entries WHERE is_pinned = 0 AND created_at < ?1",
+            )?;
+            let rows = stmt.query_map(params![cutoff], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            rows.filter_map(|res| res.ok()).collect()
+        };
+        let n = doomed.len();
+        for (id, blob_path) in doomed {
+            if let Some(path) = blob_path {
+                let _ = std::fs::remove_file(path);
+            }
+            self.conn.execute("DELETE FROM entries WHERE id = ?1", params![id])?;
+        }
+        Ok(n)
     }
 
     pub fn enforce_retention_limits(&mut self, max_unpinned_count: usize, max_total_bytes: usize) -> Result<usize> {

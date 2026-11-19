@@ -12,9 +12,83 @@ fn home_dir() -> String {
     std::env::var("HOME").unwrap_or_else(|_| ".".to_string())
 }
 
+/// Writes every log line to stderr (journald) and to the daemon log file.
+struct DualWriter {
+    file: Option<std::fs::File>,
+}
+
+impl std::io::Write for DualWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let _ = std::io::stderr().write_all(buf);
+        if let Some(f) = self.file.as_mut() {
+            let _ = f.write_all(buf);
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if let Some(f) = self.file.as_mut() {
+            let _ = f.flush();
+        }
+        Ok(())
+    }
+}
+
+/// Local-time-ish stamp without pulling chrono into the daemon.
+fn chrono_like_timestamp() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let (days, rest) = ((now / 86400) as i64, now % 86400);
+    let (h, m, s) = (rest / 3600, (rest % 3600) / 60, rest % 60);
+    // Days since epoch to y-m-d (civil algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mth = if mp < 10 { mp + 3 } else { mp - 9 };
+    let yr = if mth <= 2 { y + 1 } else { y };
+    format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC", yr, mth, d, h, m, s)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::init();
+    /* Log to journald/stderr AND a file, so "debugging ga leluasa" ends: the
+     * file survives reboot and the UI's Debug page can open it. */
+    let log_dir = format!("{}/.local/share/super-v-clipboard/logs", home_dir());
+    let _ = std::fs::create_dir_all(&log_dir);
+    let log_path = format!("{}/super-v-daemon.log", log_dir);
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .ok();
+    /* env_logger defaults to `error`, which hid every info!() line this daemon
+     * writes — the reason the log file stayed empty. Same default as the UI. */
+    if std::env::var_os("RUST_LOG").is_none() {
+        std::env::set_var("RUST_LOG", "info");
+    }
+    let mut builder = env_logger::Builder::from_env(env_logger::Env::default());
+    builder.format(|buf, record| {
+        use std::io::Write;
+        writeln!(
+            buf,
+            "[{}] [{}] {}",
+            chrono_like_timestamp(),
+            record.level(),
+            record.args()
+        )
+    });
+    builder.target(env_logger::Target::Pipe(Box::new(DualWriter {
+        file: log_file,
+    })));
+    builder.init();
+    log::info!("--- super-v-daemon started (pid {}, log: {}) ---", std::process::id(), log_path);
 
     let args: Vec<String> = std::env::args().collect();
     let is_test_run = args.iter().any(|a| a == "--test");
@@ -66,6 +140,24 @@ async fn main() -> Result<()> {
 
     if !is_test_run {
         shot_watch::spawn(Arc::clone(&db), Arc::clone(&blob_store));
+
+        /* Storage guard: a clipboard that grows without a ceiling is what makes
+         * SQLite feel sluggish after a month of use. Runs every five minutes. */
+        let db_retention = Arc::clone(&db);
+        tokio::spawn(async move {
+            const MAX_UNPINNED: usize = 5_000;
+            const MAX_BYTES: usize = 512 * 1024 * 1024;
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(300));
+            loop {
+                tick.tick().await;
+                let started = std::time::Instant::now();
+                match db_retention.lock().await.enforce_retention_limits(MAX_UNPINNED, MAX_BYTES) {
+                    Ok(0) => {}
+                    Ok(n) => log::info!("retention: evicted {} rows in {:?}", n, started.elapsed()),
+                    Err(e) => log::warn!("retention failed: {}", e),
+                }
+            }
+        });
     }
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;

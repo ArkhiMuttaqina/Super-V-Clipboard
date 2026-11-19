@@ -11,6 +11,26 @@ use super_v_core::ipc::{IpcRequest, IpcResponse};
 use super_v_core::Database;
 use crate::keyboard_injector::KeyboardInjector;
 
+/// Cheap label for the log line: the JSON variant tag plus its id when present.
+fn request_kind(line: &str) -> String {
+    match serde_json::from_str::<IpcRequest>(line) {
+        Ok(IpcRequest::GetHistory { limit }) => format!("GetHistory({})", limit),
+        Ok(IpcRequest::PasteItem { id }) => format!("PasteItem({})", id),
+        Ok(IpcRequest::TogglePin { id }) => format!("TogglePin({})", id),
+        Ok(IpcRequest::DeleteItem { id }) => format!("DeleteItem({})", id),
+        Ok(IpcRequest::ClearAll) => "ClearAll".to_string(),
+        Ok(IpcRequest::PurgeOlderThan { seconds }) => format!("PurgeOlderThan({}s)", seconds),
+        Ok(IpcRequest::ClearUnpinned) => "ClearUnpinned".to_string(),
+        Ok(IpcRequest::Search { query, limit }) => format!("Search({:?}, {})", query, limit),
+        Ok(IpcRequest::EnforceRetention { max_count, max_bytes }) =>
+            format!("EnforceRetention({}, {})", max_count, max_bytes),
+        Ok(IpcRequest::Ingest { mime, text }) => format!("Ingest({}, {}B)", mime, text.len()),
+        Ok(IpcRequest::IngestFile { mime, path }) => format!("IngestFile({}, {})", mime, path),
+        Ok(IpcRequest::InjectPaste) => "InjectPaste".to_string(),
+        Err(_) => "Malformed".to_string(),
+    }
+}
+
 pub struct IpcServer {
     socket_path: PathBuf,
     db: Arc<Mutex<Database>>,
@@ -67,6 +87,8 @@ impl IpcServer {
                 continue;
             }
 
+            let request_started = std::time::Instant::now();
+            let request_label = request_kind(&line);
             let response = match serde_json::from_str::<IpcRequest>(&line) {
                 Ok(IpcRequest::GetHistory { limit }) => {
                     let db = db.lock().await;
@@ -100,6 +122,32 @@ impl IpcServer {
                     let mut db = db.lock().await;
                     match db.clear_unpinned() {
                         Ok(_) => IpcResponse::Ack,
+                        Err(e) => IpcResponse::Error(e.to_string()),
+                    }
+                }
+                Ok(IpcRequest::ClearAll) => {
+                    let mut db = db.lock().await;
+                    match db.clear_all() {
+                        Ok(deleted) => {
+                            log::info!("clear_all: removed {} rows", deleted);
+                            IpcResponse::PurgeResult { deleted }
+                        }
+                        Err(e) => IpcResponse::Error(e.to_string()),
+                    }
+                }
+                Ok(IpcRequest::PurgeOlderThan { seconds }) => {
+                    let mut db = db.lock().await;
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                    match db.purge_older_than(now - seconds as i64) {
+                        Ok(deleted) => {
+                            if deleted > 0 {
+                                log::info!("history vanish: removed {} rows older than {}s", deleted, seconds);
+                            }
+                            IpcResponse::PurgeResult { deleted }
+                        }
                         Err(e) => IpcResponse::Error(e.to_string()),
                     }
                 }
@@ -166,6 +214,12 @@ impl IpcServer {
                 Err(e) => IpcResponse::Error(format!("Malformed request: {}", e)),
             };
 
+            match &response {
+                IpcResponse::Error(e) => log::warn!(
+                    "{} failed after {:?}: {}",
+                    request_label, request_started.elapsed(), e),
+                _ => log::info!("{} ok in {:?}", request_label, request_started.elapsed()),
+            }
             let mut out = serde_json::to_string(&response)?;
             out.push('\n');
             writer.write_all(out.as_bytes()).await?;

@@ -302,10 +302,23 @@ export default class SuperVBridgeExtension extends Extension {
         const offered = source.get_mimetypes();
         const textMime = TEXT_TYPES.find(t => offered.includes(t));
         const imageMime = IMAGE_TYPES.find(t => offered.includes(t));
-        const mime = textMime || imageMime;
-        if (!mime)
+        if (!textMime && !imageMime)
             return;
 
+        // A rich clipboard can offer both payloads at once: an image plus its
+        // label, alt text, or the page URL. Capture each independently so one
+        // copy lands every usable mime in history instead of text winning and
+        // quietly dropping the image.
+        const targets = [];
+        if (textMime)
+            targets.push({mime: textMime, isText: true});
+        if (imageMime)
+            targets.push({mime: imageMime, isText: false});
+        for (const t of targets)
+            this._readOneMime(source, t.mime, t.isText);
+    }
+
+    _readOneMime(source, mime, isText) {
         let stream;
         try {
             stream = source.transfer_async(mime, Gio.IO_PRIORITY_DEFAULT, null);
@@ -324,7 +337,7 @@ export default class SuperVBridgeExtension extends Extension {
                 if (!bytes || bytes.get_size() === 0)
                     return;
 
-                if (textMime) {
+                if (isText) {
                     let text;
                     try {
                         text = new TextDecoder('utf-8').decode(bytes.get_data());

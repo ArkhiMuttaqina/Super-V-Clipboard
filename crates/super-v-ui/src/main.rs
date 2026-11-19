@@ -44,6 +44,9 @@ extern "C" {
     fn super_v_ui_set_provider_test_hook(cb: ProviderTestHook);
     fn super_v_ui_set_placement_hook(cb: PlacementHook);
     fn super_v_ui_set_placement(mode: *const c_char);
+    fn super_v_ui_set_vanish_hook(cb: PlacementHook);
+    fn super_v_ui_set_vanish(mode: *const c_char);
+    fn super_v_ui_set_clear_all_hook(cb: ActivateHook);
     fn super_v_ui_set_clipboard_hook(cb: ClipTextHook);
     fn super_v_ui_set_image_hook(cb: ImageHook);
     fn super_v_ui_set_refresh_hook(cb: RefreshHook);
@@ -114,6 +117,9 @@ pub(crate) struct Settings {
     gif_api_key: String,
     #[serde(default = "default_placement")]
     placement: String,
+    /// History Vanish window in hours; 0 keeps everything.
+    #[serde(default)]
+    pub(crate) vanish_hours: u32,
     #[serde(default)]
     pub(crate) ai_provider: String,
     #[serde(default)]
@@ -138,6 +144,7 @@ impl Default for Settings {
             gif_provider: "local".to_string(),
             gif_api_key: String::new(),
             placement: default_placement(),
+            vanish_hours: 0,
             ai_provider: "auto".to_string(),
             ai_model: String::new(),
             ai_api_key: String::new(),
@@ -806,6 +813,47 @@ extern "C" fn on_placement_changed(mode: *const c_char) {
     append_log(&format!("placement -> {}", value));
 }
 
+extern "C" fn on_vanish_changed(mode: *const c_char) {
+    let value = if mode.is_null() {
+        "never".to_string()
+    } else {
+        unsafe { CStr::from_ptr(mode) }.to_string_lossy().to_string()
+    };
+    let hours: u32 = value.parse().unwrap_or(0);
+    let mut cfg = load_settings();
+    cfg.vanish_hours = hours;
+    save_settings(&cfg);
+    append_log(&format!("history vanish -> {} hours", hours));
+    if hours > 0 {
+        if let Some(rt) = worker() {
+            rt.spawn(async move {
+                if let Ok(mut client) = super_v_core::ipc_client::IpcClient::connect(SOCKET).await {
+                    let _ = client.purge_older_than(hours as u64 * 3600).await;
+                }
+            });
+        }
+    }
+}
+
+extern "C" fn on_clear_all_requested() {
+    if let Some(rt) = worker() {
+        rt.spawn(async move {
+            if let Ok(mut client) = super_v_core::ipc_client::IpcClient::connect(SOCKET).await {
+                match client.clear_all().await {
+                    Ok(n) => append_log(&format!("delete all: removed {} entries", n)),
+                    Err(e) => append_log(&format!("delete all failed: {}", e)),
+                }
+            }
+            /* Re-read so the list reflects the wipe. */
+            let items = match super_v_core::ipc_client::IpcClient::connect(SOCKET).await {
+                Ok(mut client) => client.get_history(80).await.unwrap_or_default(),
+                Err(_) => Vec::new(),
+            };
+            post_history(items, false);
+        });
+    }
+}
+
 extern "C" fn on_provider_test(provider: *const c_char) {
     let provider = if provider.is_null() {
         "local".to_string()
@@ -909,20 +957,18 @@ extern "C" fn on_clipboard_image(path: *const c_char, mime_ptr: *const c_char) {
         unsafe { CStr::from_ptr(mime_ptr) }.to_string_lossy().to_string()
     };
     append_log(&format!("clipboard image -> {}", file));
-    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-        Ok(rt) => rt,
-        Err(_) => return,
-    };
-    rt.block_on(async {
-        if let Ok(mut client) = super_v_core::ipc_client::IpcClient::connect(SOCKET).await {
-            let _ = client
-                .send_request(&super_v_core::ipc::IpcRequest::IngestFile {
-                    mime,
-                    path: file,
-                })
-                .await;
-        }
-    });
+    if let Some(rt) = worker() {
+        rt.spawn(async move {
+            if let Ok(mut client) = super_v_core::ipc_client::IpcClient::connect(SOCKET).await {
+                let _ = client
+                    .send_request(&super_v_core::ipc::IpcRequest::IngestFile {
+                        mime,
+                        path: file,
+                    })
+                    .await;
+            }
+        });
+    }
 }
 
 extern "C" fn on_clipboard_text(text: *const c_char) {
@@ -933,52 +979,42 @@ extern "C" fn on_clipboard_text(text: *const c_char) {
     if value.trim().is_empty() {
         return;
     }
-    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-        Ok(rt) => rt,
-        Err(_) => return,
-    };
     let preview: String = value.chars().take(40).collect();
     append_log(&format!("clipboard changed: {} chars [{}]", value.chars().count(), preview));
-    rt.block_on(async {
-        if let Ok(mut client) = super_v_core::ipc_client::IpcClient::connect(SOCKET).await {
-            let _ = client
-                .send_request(&super_v_core::ipc::IpcRequest::Ingest {
-                    mime: "text/plain".to_string(),
-                    text: value,
-                })
-                .await;
-        }
-    });
+    if let Some(rt) = worker() {
+        rt.spawn(async move {
+            if let Ok(mut client) = super_v_core::ipc_client::IpcClient::connect(SOCKET).await {
+                let _ = client
+                    .send_request(&super_v_core::ipc::IpcRequest::Ingest {
+                        mime: "text/plain".to_string(),
+                        text: value,
+                    })
+                    .await;
+            }
+        });
+    }
 }
 extern "C" fn on_paste_selected(id: libc::c_longlong, text_ptr: *const c_char) {
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build();
-    let ok = match rt {
-        Ok(rt) => rt,
-        Err(_) => return,
-    };
-    let glyph = if text_ptr.is_null() {
-        None
-    } else {
-        Some(unsafe { CStr::from_ptr(text_ptr) }.to_string_lossy().to_string())
-    };
-    ok.block_on(async {
-        if let Ok(mut client) = super_v_core::ipc_client::IpcClient::connect(SOCKET).await {
-            /* id 0 with no text means the clipboard is already prepared (image or
-             * GIF paste); only the keystroke is missing. */
-            let request = if id > 0 {
-                super_v_core::ipc::IpcRequest::PasteItem { id: id as i64 }
-            } else {
-                super_v_core::ipc::IpcRequest::InjectPaste
-            };
-            let _ = client.send_request(&request).await;
-        }
-    });
+    let _ = text_ptr;
+    if let Some(rt) = worker() {
+        rt.spawn(async move {
+            if let Ok(mut client) = super_v_core::ipc_client::IpcClient::connect(SOCKET).await {
+                /* id 0 with no text means the clipboard is already prepared (image or
+                 * GIF paste); only the keystroke is missing. */
+                let request = if id > 0 {
+                    super_v_core::ipc::IpcRequest::PasteItem { id: id as i64 }
+                } else {
+                    super_v_core::ipc::IpcRequest::InjectPaste
+                };
+                let _ = client.send_request(&request).await;
+            }
+        });
+    }
 }
 
 extern "C" fn on_pin_toggled(id: libc::c_longlong) {
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build();
-    if let Ok(rt) = rt {
-        rt.block_on(async {
+    if let Some(rt) = worker() {
+        rt.spawn(async move {
             if let Ok(mut client) = super_v_core::ipc_client::IpcClient::connect(SOCKET).await {
                 let _ = client.toggle_pin(id as i64).await;
             }
@@ -987,9 +1023,8 @@ extern "C" fn on_pin_toggled(id: libc::c_longlong) {
 }
 
 extern "C" fn on_delete_item(id: libc::c_longlong) {
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build();
-    if let Ok(rt) = rt {
-        rt.block_on(async {
+    if let Some(rt) = worker() {
+        rt.spawn(async move {
             if let Ok(mut client) = super_v_core::ipc_client::IpcClient::connect(SOCKET).await {
                 let _ = client.delete_item(id as i64).await;
             }
@@ -1020,6 +1055,55 @@ fn populate_history(items: Vec<super_v_core::ClipboardItem>) {
     }
 }
 
+/* ---- daemon round-trips ---------------------------------------------------
+ * Every one of these callbacks is invoked by the GTK main loop. Building a
+ * fresh runtime and block_on()-ing the daemon connection there froze the whole
+ * window whenever the daemon was slow or its DB mutex was held: GNOME drew the
+ * grey veil and called it "not responding". Requests now leave from a shared
+ * worker runtime; results come back through super_v_ui_post_to_main. */
+static WORKER: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+
+fn worker() -> Option<&'static tokio::runtime::Runtime> {
+    if let Some(rt) = WORKER.get() {
+        return Some(rt);
+    }
+    let built = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .ok()?;
+    let _ = WORKER.set(built);
+    WORKER.get()
+}
+
+/// (items, dedupe) delivered on the GTK thread.
+extern "C" fn deliver_history(data: *mut std::ffi::c_void) {
+    use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+    static LAST_TOP: AtomicI64 = AtomicI64::new(-1);
+    static LAST_COUNT: AtomicUsize = AtomicUsize::new(0);
+    if data.is_null() {
+        return;
+    }
+    let (items, dedupe) = unsafe {
+        *Box::from_raw(data as *mut (Vec<super_v_core::ClipboardItem>, bool))
+    };
+    if dedupe {
+        let (top, count) = history_signature(&items);
+        if top == LAST_TOP.load(Ordering::Relaxed) && count == LAST_COUNT.load(Ordering::Relaxed) {
+            return;
+        }
+        LAST_TOP.store(top, Ordering::Relaxed);
+        LAST_COUNT.store(count, Ordering::Relaxed);
+    }
+    unsafe { super_v_ui_clear_history_items() };
+    populate_history(items);
+}
+
+fn post_history(items: Vec<super_v_core::ClipboardItem>, dedupe: bool) {
+    let payload = Box::into_raw(Box::new((items, dedupe))) as *mut std::ffi::c_void;
+    unsafe { super_v_ui_post_to_main(deliver_history, payload) };
+}
+
 /// Newest id plus row count: cheap way to notice that the daemon stored something.
 fn history_signature(items: &[super_v_core::ClipboardItem]) -> (i64, usize) {
     let top = items.first().and_then(|i| i.id).unwrap_or(0);
@@ -1027,80 +1111,139 @@ fn history_signature(items: &[super_v_core::ClipboardItem]) -> (i64, usize) {
 }
 
 extern "C" fn on_live_update() {
-    use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
-    static LAST_TOP: AtomicI64 = AtomicI64::new(-1);
-    static LAST_COUNT: AtomicUsize = AtomicUsize::new(0);
-
-    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-        Ok(rt) => rt,
-        Err(_) => return,
-    };
-    let items = rt.block_on(async {
-        match super_v_core::ipc_client::IpcClient::connect(SOCKET).await {
-            Ok(mut client) => client.get_history(80).await.unwrap_or_default(),
-            Err(_) => Vec::new(),
-        }
-    });
-
-    let (top, count) = history_signature(&items);
-    if top == LAST_TOP.load(Ordering::Relaxed) && count == LAST_COUNT.load(Ordering::Relaxed) {
-        return;
+    if let Some(rt) = worker() {
+        /* None = the fetch failed (timeout or no daemon): keep the rows we have.
+         * Clearing on a transient stall reads as "my history vanished", and the
+         * next tick puts the real list back anyway. */
+        rt.spawn(async move {
+            let items = match super_v_core::ipc_client::IpcClient::connect(SOCKET).await {
+                Ok(mut client) => client.get_history(80).await.ok(),
+                Err(_) => None,
+            };
+            if let Some(items) = items {
+                post_history(items, true);
+            }
+        });
     }
-    LAST_TOP.store(top, Ordering::Relaxed);
-    LAST_COUNT.store(count, Ordering::Relaxed);
-
-    unsafe { super_v_ui_clear_history_items(); }
-    populate_history(items);
 }
 
 extern "C" fn on_refresh_history() {
-    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-        Ok(rt) => rt,
-        Err(_) => return,
-    };
-    let items = rt.block_on(async {
-        match super_v_core::ipc_client::IpcClient::connect(SOCKET).await {
-            Ok(mut client) => client.get_history(80).await.unwrap_or_default(),
-            Err(_) => Vec::new(),
-        }
-    });
-    unsafe { super_v_ui_clear_history_items(); }
-    populate_history(items);
+    if let Some(rt) = worker() {
+        rt.spawn(async move {
+            let items = match super_v_core::ipc_client::IpcClient::connect(SOCKET).await {
+                Ok(mut client) => client.get_history(80).await.ok(),
+                Err(_) => None,
+            };
+            if let Some(items) = items {
+                post_history(items, false);
+            }
+        });
+    }
 }
 
 extern "C" fn on_primary_activated() {
-    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-        Ok(rt) => rt,
-        Err(_) => return,
-    };
-
-    let items = rt.block_on(async {
-        match super_v_core::ipc_client::IpcClient::connect(SOCKET).await {
-            Ok(mut client) => client.get_history(80).await.unwrap_or_default(),
-            Err(_) => Vec::new(),
-        }
-    });
-
-    unsafe { super_v_ui_clear_history_items(); }
     let boot_cfg = load_settings();
+    /* History fetch and the preferences below both happen off the GTK thread:
+     * the overlay must paint its first frame immediately. */
+    if let Some(rt) = worker() {
+        rt.spawn(async move {
+            let items = match super_v_core::ipc_client::IpcClient::connect(SOCKET).await {
+                Ok(mut client) => client.get_history(80).await.unwrap_or_default(),
+                Err(_) => Vec::new(),
+            };
+            post_history(items, false);
+        });
+    }
     if let Ok(k) = CString::new(boot_cfg.gif_api_key) {
         unsafe { super_v_ui_set_api_key_text(k.as_ptr()); }
     }
     if let Ok(p) = CString::new(boot_cfg.placement) {
         unsafe { super_v_ui_set_placement(p.as_ptr()); }
     }
+    if let Ok(v) = CString::new(boot_cfg.vanish_hours.to_string()) {
+        unsafe { super_v_ui_set_vanish(v.as_ptr()); }
+    }
+    /* Sweep on every activation: the timer only runs while the app is up. */
+    if boot_cfg.vanish_hours > 0 {
+        let secs = boot_cfg.vanish_hours as u64 * 3600;
+        if let Some(rt) = worker() {
+            rt.spawn(async move {
+                if let Ok(mut client) = super_v_core::ipc_client::IpcClient::connect(SOCKET).await {
+                    let _ = client.purge_older_than(secs).await;
+                }
+            });
+        }
+    }
     {
         let langs = CString::new(current_langs()).unwrap_or_default();
         let gif = CString::new(current_gif_provider()).unwrap_or_default();
         unsafe { super_v_ui_apply_preferences(langs.as_ptr(), gif.as_ptr()); }
     }
-    populate_history(items);
+}
+
+/* ------------------------------------------------------------ extension */
+
+const EXT_UUID: &str = "super-v-bridge@arkhimuttaqina.my.id";
+const EXT_METADATA: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
+    "/../../data/gnome-extension/metadata.json"));
+const EXT_SCRIPT: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
+    "/../../data/gnome-extension/extension.js"));
+
+static EXT_UUID_C: OnceLock<CString> = OnceLock::new();
+static EXT_METADATA_C: OnceLock<CString> = OnceLock::new();
+static EXT_SCRIPT_C: OnceLock<CString> = OnceLock::new();
+
+#[no_mangle]
+pub extern "C" fn super_v_ui_extension_uuid() -> *const c_char {
+    EXT_UUID_C.get_or_init(|| CString::new(EXT_UUID).unwrap()).as_ptr()
+}
+
+#[no_mangle]
+pub extern "C" fn super_v_ui_extension_metadata() -> *const c_char {
+    EXT_METADATA_C.get_or_init(|| CString::new(EXT_METADATA).unwrap()).as_ptr()
+}
+
+#[no_mangle]
+pub extern "C" fn super_v_ui_extension_script() -> *const c_char {
+    EXT_SCRIPT_C.get_or_init(|| CString::new(EXT_SCRIPT).unwrap()).as_ptr()
+}
+
+fn ext_dir() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    std::path::PathBuf::from(home)
+        .join(".local").join("share").join("gnome-shell")
+        .join("extensions").join(EXT_UUID)
+}
+
+fn extension_installed() -> bool {
+    ext_dir().join("extension.js").is_file() && ext_dir().join("metadata.json").is_file()
+}
+
+/// Copy the embedded bridge into the GNOME extensions dir so the picker can
+/// self-install without the repo Makefile; `gnome-extensions enable` asks the
+/// running shell to load it (a no-op when it is already enabled).
+fn install_gnome_extension() -> Result<(), String> {
+    let dir = ext_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("metadata.json"), EXT_METADATA).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("extension.js"), EXT_SCRIPT).map_err(|e| e.to_string())?;
+    let _ = std::process::Command::new("gnome-extensions")
+        .args(["enable", EXT_UUID]).output();
+    Ok(())
 }
 
 fn run_diagnostics_and_autofix() -> Result<()> {
     println!("=== Super-V Clipboard Self-Diagnostics ===");
     if let Ok(w) = env::var("WAYLAND_DISPLAY") { println!("      Wayland: {}", w); }
     else if let Ok(x) = env::var("DISPLAY") { println!("      X11: {}", x); }
+
+    let was = extension_installed();
+    if was || install_gnome_extension().is_ok() {
+        println!("      Extension: {} (log out and back in to activate)",
+            if was { "installed" } else { "installed now" });
+    } else {
+        println!("      Extension: not installed (check ~/.local/share/gnome-shell/extensions)");
+    }
 
     let running = std::process::Command::new("pgrep")
         .args(["-x", "super-v-daemon"]).output()
@@ -1187,6 +1330,8 @@ fn main() -> Result<()> {
         super_v_ui_set_api_key_hook(on_api_key_changed);
         super_v_ui_set_provider_test_hook(on_provider_test);
         super_v_ui_set_placement_hook(on_placement_changed);
+        super_v_ui_set_vanish_hook(on_vanish_changed);
+        super_v_ui_set_clear_all_hook(on_clear_all_requested);
         if std::env::args().any(|a| a == "--hidden") {
             unsafe { super_v_ui_set_start_hidden(1) };
         }

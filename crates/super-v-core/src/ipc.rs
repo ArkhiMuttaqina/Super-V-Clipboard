@@ -16,6 +16,10 @@ pub enum IpcRequest {
     DeleteItem { id: i64 },
     /// Clear all unpinned items
     ClearUnpinned,
+    /// Delete every item, pinned included
+    ClearAll,
+    /// Drop items older than `seconds` (History Vanish); pinned rows stay
+    PurgeOlderThan { seconds: u64 },
     /// Search items via SQLite FTS5
     Search { query: String, limit: usize },
     /// Enforce storage retention limits
@@ -34,6 +38,7 @@ pub enum IpcResponse {
     History(Vec<ClipboardItem>),
     SearchResult(Vec<ClipboardItem>),
     RetentionResult { evicted_count: usize },
+    PurgeResult { deleted: usize },
     Ack,
     Error(String),
 }
