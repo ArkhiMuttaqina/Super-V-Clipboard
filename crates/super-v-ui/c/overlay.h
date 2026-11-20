@@ -25,7 +25,7 @@ typedef void (*MoveTopCallback)(long long id);
    An empty/NULL query means "the whole tab"; otherwise the query is a
    localized search string. The provider must call super_v_ui_add_glyph_item()
    for each emitted row and return how many it emitted. */
-typedef int (*GlyphProvider)(const char *tab, const char *query, int offset, int limit);
+typedef int (*GlyphProvider)(const char *tab, const char *query, int offset, int limit, int group);
 
 /* Skin-tone variants for one glyph: exact RGI sequences separated by 0x1F,
    written into caller-provided storage. Returns bytes written (excluding the
@@ -77,6 +77,7 @@ void super_v_ui_set_ai_status(const char *text);
 void super_v_ui_set_delete_callback(DeleteCallback cb);
 void super_v_ui_set_move_top_callback(MoveTopCallback cb);
 void super_v_ui_set_glyph_provider(GlyphProvider cb);
+void super_v_ui_set_glyph_groups_provider(const char *(*cb)(void));
 void super_v_ui_set_glyph_variants_provider(GlyphVariantsProvider cb);
 void super_v_ui_set_activate_hook(ActivateHook cb);
 void super_v_ui_set_language_hook(LanguageHook cb);

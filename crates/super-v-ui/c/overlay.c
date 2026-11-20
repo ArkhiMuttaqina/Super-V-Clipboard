@@ -101,6 +101,12 @@ static int g_done_emoji = 0;
 static int g_done_symbol = 0;
 
 static char g_query_emoji[160] = "";
+/* Selected emoji category; -1 means every group. */
+static int g_emoji_group = -1;
+static GtkWidget *g_emoji_chips = NULL;
+typedef const char *(*GlyphGroupsFn)(void);
+static GlyphGroupsFn g_glyph_groups = NULL;
+static void on_emoji_chip_clicked(GtkButton *btn, gpointer data);
 static char g_query_symbol[160] = "";
 static char g_langs[64] = "en,id";
 static char g_gif_provider[32] = "local";
@@ -172,6 +178,7 @@ void super_v_ui_set_refresh_hook(RefreshHook cb) { g_refresh_hook = cb; }
 void super_v_ui_set_live_update_hook(UpdateHook cb) { g_live_update_hook = cb; }
 void super_v_ui_set_delete_callback(DeleteCallback cb) { g_delete_cb = cb; }
 void super_v_ui_set_glyph_provider(GlyphProvider cb) { g_glyph_provider = cb; }
+void super_v_ui_set_glyph_groups_provider(const char *(*cb)(void)) { g_glyph_groups = cb; }
 void super_v_ui_set_activate_hook(ActivateHook cb) { g_activate_hook = cb; }
 void super_v_ui_set_language_hook(LanguageHook cb) { g_language_hook = cb; }
 void super_v_ui_set_gif_provider_hook(GifProviderHook cb) { g_gif_provider_hook = cb; }
@@ -1286,7 +1293,8 @@ static void first_page(const char *tab) {
     if (!g_glyph_provider) return;
     const char *slug = (strcmp(tab, "symbols") == 0) ? "symbol" : tab;
     super_v_ui_clear_glyphs(tab);
-    int n = g_glyph_provider(slug, saved_query_for(tab), 0, GLYPH_PAGE);
+    int n = g_glyph_provider(slug, saved_query_for(tab), 0, GLYPH_PAGE,
+                                strcmp(slug, "emoji") == 0 ? g_emoji_group : -1);
     if (strcmp(slug, "emoji") == 0) {
         g_offset_emoji = n;
         g_done_emoji = (n < GLYPH_PAGE);
@@ -1305,7 +1313,7 @@ static void load_more_glyphs(const char *tab) {
     g_loading_page = TRUE;
     int offset = is_emoji ? g_offset_emoji : g_offset_symbol;
     const char *slug = is_emoji ? "emoji" : "symbol";
-    int emitted = g_glyph_provider(slug, is_emoji ? g_query_emoji : g_query_symbol, offset, GLYPH_PAGE);
+    int emitted = g_glyph_provider(slug, is_emoji ? g_query_emoji : g_query_symbol, offset, GLYPH_PAGE, is_emoji ? g_emoji_group : -1);
     offset += emitted;
     if (is_emoji) {
         g_offset_emoji = offset;
@@ -1505,6 +1513,25 @@ static const char *langs_for_index(int idx) {
         case 2: return "id";
         default: return "en,id";
     }
+}
+
+static void on_emoji_chip_clicked(GtkButton *btn, gpointer data) {
+    (void)data;
+    gint64 *heap = g_object_get_data(G_OBJECT(btn), "chip_group");
+    int group = heap ? (int)*heap : -1;
+    /* Clicking the active chip clears the filter. */
+    g_emoji_group = (group == g_emoji_group) ? -1 : group;
+    for (GtkWidget *c = gtk_widget_get_first_child(g_emoji_chips); c;
+         c = gtk_widget_get_next_sibling(c)) {
+        gint64 *h = g_object_get_data(G_OBJECT(c), "chip_group");
+        gboolean on = h && (int)*h == g_emoji_group;
+        if (on) gtk_widget_add_css_class(c, "suggested-action");
+        else gtk_widget_remove_css_class(c, "suggested-action");
+    }
+    g_offset_emoji = 0;
+    g_done_emoji = 0;
+    super_v_ui_clear_glyphs("emoji");
+    first_page("emoji");
 }
 
 static void on_lang_changed(GObject *obj, GParamSpec *pspec, gpointer user_data) {
@@ -3913,6 +3940,34 @@ static GtkWidget *create_main_window(AdwApplication *app) {
         "Search clipboard, emoji (sad, marah, cinta), symbols...");
     g_signal_connect(g_search_entry, "search-changed", G_CALLBACK(on_search_changed), NULL);
     gtk_box_append(GTK_BOX(main_box), g_search_entry);
+    /* Emoji category chips, built from the dataset's CLDR group list. */
+    g_emoji_chips = gtk_flow_box_new();
+    gtk_flow_box_set_max_children_per_line(GTK_FLOW_BOX(g_emoji_chips), 16);
+    gtk_flow_box_set_selection_mode(GTK_FLOW_BOX(g_emoji_chips), GTK_SELECTION_NONE);
+    gtk_orientable_set_orientation(GTK_ORIENTABLE(g_emoji_chips), GTK_ORIENTATION_HORIZONTAL);
+    gtk_widget_set_margin_start(g_emoji_chips, 8);
+    gtk_widget_set_margin_end(g_emoji_chips, 8);
+    gtk_widget_set_visible(g_emoji_chips, FALSE);
+    gtk_box_append(GTK_BOX(main_box), g_emoji_chips);
+
+    if (g_glyph_groups) {
+        const char *blob = g_glyph_groups();
+        if (blob && *blob) {
+            char **names = g_strsplit(blob, "|", -1);
+            for (int i = 0; names && names[i]; i++) {
+                GtkWidget *chip = gtk_button_new_with_label(names[i]);
+                gtk_widget_add_css_class(chip, "flat");
+                gtk_widget_add_css_class(chip, "emoji-chip");
+                gint64 *heap = g_new0(gint64, 1);
+                *heap = i;
+                g_object_set_data_full(G_OBJECT(chip), "chip_group", heap, g_free);
+                g_signal_connect(chip, "clicked", G_CALLBACK(on_emoji_chip_clicked), NULL);
+                gtk_flow_box_append(GTK_FLOW_BOX(g_emoji_chips), chip);
+            }
+            g_strfreev(names);
+        }
+    }
+
 
     /* Bridge status: paste and capture need the GNOME extension. */
     g_bridge_banner_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);

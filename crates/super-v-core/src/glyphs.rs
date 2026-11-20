@@ -436,6 +436,20 @@ impl GlyphIndex {
         }
     }
 
+    /// Browse indices restricted to one CLDR group, in dataset order. Used by
+    /// the emoji category chips; None means every group.
+    fn browse_group(&self, tab: &str, group: Option<usize>) -> Vec<usize> {
+        match group {
+            None => self.browse_indices(tab).to_vec(),
+            Some(g) => self
+                .browse_indices(tab)
+                .iter()
+                .copied()
+                .filter(|&i| self.source(tab)[i].group == g)
+                .collect(),
+        }
+    }
+
     /// Search one tab. An empty query pages the browsable dataset (base glyphs
     /// only). Results are ranked: exact glyph, exact code points, name prefix,
     /// name substring, keyword substring, then token matches.
@@ -447,14 +461,28 @@ impl GlyphIndex {
         offset: usize,
         limit: usize,
     ) -> Vec<&RawGlyph> {
+        self.search_in_group(tab, query, langs, None, offset, limit)
+    }
+
+    /// Same as search(), narrowed to one CLDR group so the emoji chips can
+    /// show a category without changing the query text.
+    pub fn search_in_group(
+        &self,
+        tab: &str,
+        query: &str,
+        langs: &str,
+        group: Option<usize>,
+        offset: usize,
+        limit: usize,
+    ) -> Vec<&RawGlyph> {
         let src = self.source(tab);
         if query.trim().trim_matches(':').trim().is_empty() {
             return self
-                .browse_indices(tab)
-                .iter()
+                .browse_group(tab, group)
+                .into_iter()
                 .skip(offset)
                 .take(limit)
-                .map(|&i| &src[i])
+                .map(|i| &src[i])
                 .collect();
         }
         self.hits(tab, query, langs)
@@ -468,10 +496,28 @@ impl GlyphIndex {
     /// Total hits for a query, so the UI can stop paging. Uses the same ranking
     /// path as [`Self::search`] so the count always matches the pages.
     pub fn search_total(&self, tab: &str, query: &str, langs: &str) -> usize {
+        self.search_total_in_group(tab, query, langs, None)
+    }
+
+    /// Count counterpart of search_in_group().
+    pub fn search_total_in_group(
+        &self,
+        tab: &str,
+        query: &str,
+        langs: &str,
+        group: Option<usize>,
+    ) -> usize {
         if query.trim().trim_matches(':').trim().is_empty() {
-            return self.browse_indices(tab).len();
+            return self.browse_group(tab, group).len();
         }
-        self.hits(tab, query, langs).len()
+        let hits = self.hits(tab, query, langs);
+        match group {
+            Some(g) => {
+                let src = self.source(tab);
+                hits.into_iter().filter(|&i| src[i].group == g).count()
+            }
+            None => hits.len(),
+        }
     }
 }
 

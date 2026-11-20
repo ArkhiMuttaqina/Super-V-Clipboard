@@ -11,7 +11,8 @@ type PasteCallback = extern "C" fn(id: libc::c_longlong, text: *const c_char);
 type PinCallback = extern "C" fn(id: libc::c_longlong);
 type DeleteCallback = extern "C" fn(id: libc::c_longlong);
 type MoveTopCallback = extern "C" fn(id: libc::c_longlong);
-type GlyphProvider = extern "C" fn(tab: *const c_char, query: *const c_char, offset: c_int, limit: c_int) -> c_int;
+type GlyphProvider = extern "C" fn(tab: *const c_char, query: *const c_char, offset: c_int, limit: c_int, group: c_int) -> c_int;
+type GlyphGroupsProvider = extern "C" fn() -> *const c_char;
 type GlyphVariantsProvider = extern "C" fn(glyph: *const c_char, out: *mut c_char, cap: c_int) -> c_int;
 type ActivateHook = extern "C" fn();
 type LanguageHook = extern "C" fn(langs: *const c_char);
@@ -34,6 +35,7 @@ extern "C" {
     fn super_v_ui_set_delete_callback(cb: DeleteCallback);
     fn super_v_ui_set_move_top_callback(cb: MoveTopCallback);
     fn super_v_ui_set_glyph_provider(cb: GlyphProvider);
+    fn super_v_ui_set_glyph_groups_provider(cb: GlyphGroupsProvider);
     fn super_v_ui_set_glyph_variants_provider(cb: GlyphVariantsProvider);
     fn super_v_ui_set_activate_hook(cb: ActivateHook);
     fn super_v_ui_set_language_hook(cb: LanguageHook);
@@ -193,7 +195,12 @@ static GIF_PROVIDER: std::sync::Mutex<String> = std::sync::Mutex::new(String::ne
 static GIF_QUERY: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 
 fn current_langs() -> String {
-    LANGS.lock().map(|g| g.clone()).unwrap_or_else(|_| "en,id".to_string())
+    // The Mutex starts empty, so an empty string means "not initialised yet" —
+    // falling back per-call kept search stuck on English-only after boot.
+    match LANGS.lock().map(|g| g.clone()) {
+        Ok(v) if !v.trim().is_empty() => v,
+        _ => "en,id".to_string(),
+    }
 }
 
 fn current_gif_provider() -> String {
@@ -876,7 +883,13 @@ extern "C" fn on_provider_test(provider: *const c_char) {
 }
 
 /* Zero-alloc paging: only the requested page becomes GTK widgets. */
-extern "C" fn provide_glyph_page(tab: *const c_char, query: *const c_char, offset: c_int, limit: c_int) -> c_int {
+extern "C" fn provide_glyph_page(
+    tab: *const c_char,
+    query: *const c_char,
+    offset: c_int,
+    limit: c_int,
+    group: c_int,
+) -> c_int {
     if tab.is_null() || limit <= 0 {
         return 0;
     }
@@ -893,7 +906,16 @@ extern "C" fn provide_glyph_page(tab: *const c_char, query: *const c_char, offse
 
     let langs = current_langs();
     let idx = glyph_index();
-    let page = idx.search(&tab_name, &query_str, &langs, offset.max(0) as usize, limit as usize);
+    /* -1 means every category; the emoji chips pass a CLDR group index. */
+    let group_filter = if group < 0 { None } else { Some(group as usize) };
+    let page = idx.search_in_group(
+        &tab_name,
+        &query_str,
+        &langs,
+        group_filter,
+        offset.max(0) as usize,
+        limit as usize,
+    );
 
     let c_tab = match CString::new(tab_name.as_str()) { Ok(v) => v, Err(_) => return 0 };
     let skin_tab = tab_name == "emoji";
@@ -1218,6 +1240,27 @@ static EXT_UUID_C: OnceLock<CString> = OnceLock::new();
 static EXT_METADATA_C: OnceLock<CString> = OnceLock::new();
 static EXT_SCRIPT_C: OnceLock<CString> = OnceLock::new();
 
+static GLYPH_GROUPS_C: OnceLock<CString> = OnceLock::new();
+
+/// Pipe-separated CLDR group names, dataset order, for the emoji chips.
+#[no_mangle]
+pub extern "C" fn super_v_ui_glyph_groups() -> *const c_char {
+    GLYPH_GROUPS_C
+        .get_or_init(|| {
+            let idx = glyph_index();
+            let mut names: Vec<String> = Vec::new();
+            for g in 0..64 {
+                match idx.group_name(g) {
+                    Some(name) => names.push(name.to_string()),
+                    None => break,
+                }
+            }
+            CString::new(names.join("|"))
+                .unwrap_or_else(|_| CString::new("").unwrap())
+        })
+        .as_ptr()
+}
+
 #[no_mangle]
 pub extern "C" fn super_v_ui_extension_uuid() -> *const c_char {
     EXT_UUID_C.get_or_init(|| CString::new(EXT_UUID).unwrap()).as_ptr()
@@ -1346,6 +1389,7 @@ fn main() -> Result<()> {
         super_v_ui_set_delete_callback(on_delete_item);
         super_v_ui_set_move_top_callback(on_move_to_top);
         super_v_ui_set_glyph_provider(provide_glyph_page);
+        super_v_ui_set_glyph_groups_provider(super_v_ui_glyph_groups);
         super_v_ui_set_glyph_variants_provider(provide_glyph_variants);
         super_v_ui_set_activate_hook(on_primary_activated);
         super_v_ui_set_language_hook(on_language_changed);
