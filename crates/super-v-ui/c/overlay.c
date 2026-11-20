@@ -143,6 +143,7 @@ static void seed_ai_with(const char *text);
 static void cancel_idle_exit(void);
 static void schedule_idle_exit(void);
 static GtkWidget *make_thumb(const char *path, int size);
+static GtkWidget *make_preview(const char *path);
 static GtkWidget *make_gif_thumb(const char *path, int size);
 static void on_gif_clicked(GtkButton *btn, gpointer user_data);
 static void select_combo(GtkWidget *combo, guint idx);
@@ -244,6 +245,7 @@ static void install_css(void) {
         /* The GtkImage prefix is clamped by -gtk-icon-size, and the value has
          * to track make_thumb()'s size or the picture paints small again. */
         ".clip-image-thumb { -gtk-icon-size: 112px; border-radius: 8px; }\n"
+        ".clip-preview { border-radius: 6px; }\n"
         ".clip-body { font-size: 0.98em; }\n"
         ".clip-meta { font-size: 78%; opacity: 0.5; margin-top: 1px; }\n"
         ".emoji-chip { font-size: 84%; padding: 2px 10px; min-height: 26px;"
@@ -758,12 +760,8 @@ void super_v_ui_add_history_item(const char *title, const char *subtitle, int is
 
     GtkWidget *row;
     if (is_image && preview_image_path && *preview_image_path) {
-        /* Card is the picture. */
-        GtkWidget *thumb = make_thumb(preview_image_path, 132);
-        gtk_widget_add_css_class(thumb, "clip-image-thumb");
-        gtk_widget_set_halign(thumb, GTK_ALIGN_FILL);
-        gtk_widget_set_hexpand(thumb, TRUE);
-        gtk_widget_set_valign(thumb, GTK_ALIGN_START);
+        /* Card is the picture, at full card width. */
+        GtkWidget *thumb = make_preview(preview_image_path);
         gtk_box_append(GTK_BOX(card), thumb);
 
         /* Metadata strip below the picture, like Windows shows it. */
@@ -2428,6 +2426,24 @@ static gpointer thumb_worker(gpointer data) {
     g_free(job);
     super_v_ui_post_to_main(deliver_thumb, ready);
     return NULL;
+}
+
+/* History image preview: fills the card's width instead of sitting in a
+ * small square box. GtkPicture scales to the allocation, so the picture is as
+ * wide as the panel and tall enough to actually recognise. */
+static GtkWidget *make_preview(const char *path) {
+    /* For a real file, new_for_filename decodes up front. set_filename() after
+     * creation defers the load, and nothing pumps the main loop between the
+     * row being added and the first paint — the picture stayed empty. */
+    GtkWidget *pic = gtk_picture_new_for_filename(path);
+    gtk_picture_set_can_shrink(GTK_PICTURE(pic), TRUE);
+    gtk_picture_set_content_fit(GTK_PICTURE(pic), GTK_CONTENT_FIT_COVER);
+    gtk_widget_set_hexpand(pic, TRUE);
+    gtk_widget_set_halign(pic, GTK_ALIGN_FILL);
+    gtk_widget_set_valign(pic, GTK_ALIGN_START);
+    gtk_widget_set_size_request(pic, -1, 240);
+    gtk_widget_add_css_class(pic, "clip-preview");
+    return pic;
 }
 
 static GtkWidget *make_thumb(const char *path, int size) {
