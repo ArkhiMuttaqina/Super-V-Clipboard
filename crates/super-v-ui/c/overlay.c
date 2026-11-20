@@ -226,12 +226,24 @@ static void install_css(void) {
         ".gif-cell image, .gif-cell picture { -gtk-icon-size: 84px; border-radius: 8px; }\n"
         ".superv-overlay { background: transparent; }\n"
         ".section-row { background: transparent; box-shadow: none; border: none; padding: 0; min-height: 0; }\n"
+        ".clip-row { background: transparent; box-shadow: none; border: none; padding: 0; }\n"
+        ".clip-card { background-color: @card_bg_color; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.18); border: 1px solid alpha(currentColor, 0.05); }\n"
+        ".clip-row:hover .clip-card { background-color: alpha(@accent_bg_color, 0.08); }\n"
+        ".clip-row.pinned-row .clip-card { background-color: color-mix(in srgb, #f5c211 8%, @card_bg_color); border-color: alpha(#f5c211, 0.25); }\n"
         ".section-label { font-weight: 700; font-size: 88%; opacity: 0.6; margin: 10px 6px 2px 6px; }\n"
         ".pin-badge { -gtk-icon-size: 16px; color: #f5c211; margin-top: 2px; }\n"
         /* libadwaita constrains row-prefix images to icon size; the GIF cells
          * already override this the same way. Without it a 96px thumb paints
          * as a ~16px smudge. */
-        ".clip-image-thumb { -gtk-icon-size: 96px; border-radius: 8px; padding: 2px; }\n"
+        /* The GtkImage prefix is clamped by -gtk-icon-size, and the value has
+         * to track make_thumb()'s size or the picture paints small again. */
+        ".clip-image-thumb { -gtk-icon-size: 160px; border-radius: 10px; }\n"
+        ".clip-body { font-size: 1.02em; line-height: 1.25; }\n"
+        ".clip-meta { font-size: 82%; opacity: 0.55; }\n"
+        ".emoji-chip { font-size: 84%; padding: 2px 10px; min-height: 26px;"
+        " border-radius: 13px; border: 1px solid alpha(currentColor, 0.18); }\n"
+        ".emoji-chip.suggested-action { border-color: transparent; }\n"
+        ".pinned-row { background-color: alpha(#f5c211, 0.07); }\n"
         ".variant-dot { font-size: 10px; opacity: 0.8; margin-bottom: 0; }\n"
         ".warning-banner { background-color: alpha(@warning_color, 0.18); border-radius: 10px; padding: 8px; }\n"
         ".superv-card { background-color: @window_bg_color; border-radius: 14px; border: 1px solid @borders; box-shadow: 0 8px 28px rgba(0,0,0,0.35); }\n";
@@ -729,11 +741,28 @@ void super_v_ui_add_history_item(const char *title, const char *subtitle, int is
      * icon size and has nowhere to put the actions except a suffix strip. */
     GtkWidget *row = gtk_list_box_row_new();
     gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(row), TRUE);
-    GtkWidget *outer = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
-    gtk_widget_set_margin_start(outer, 12);
-    gtk_widget_set_margin_end(outer, 8);
-    gtk_widget_set_margin_top(outer, 8);
-    gtk_widget_set_margin_bottom(outer, 8);
+    /* The list box itself is transparent; each entry is its own card so the
+     * rows read as separate objects instead of one grey slab. */
+    gtk_widget_add_css_class(row, "clip-row");
+    GtkWidget *outer = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
+    gtk_widget_add_css_class(outer, "clip-card");
+    gtk_widget_set_margin_start(outer, 6);
+    gtk_widget_set_margin_end(outer, 6);
+    gtk_widget_set_margin_top(outer, 4);
+    gtk_widget_set_margin_bottom(outer, 4);
+    /* Padding has to live on the card box itself: a margin on the row would
+     * sit outside the rounded background and the card would touch the edges. */
+    gtk_widget_set_margin_start(outer, 6);
+    /* Images stack picture-over-meta; text rows run body-beside-meta. */
+    gboolean is_image_row = (preview_image_path && *preview_image_path)
+        || (mime && g_str_has_prefix(mime, "image/"));
+    GtkWidget *pad = gtk_box_new(
+        is_image_row ? GTK_ORIENTATION_VERTICAL : GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_widget_set_margin_start(pad, 10);
+    gtk_widget_set_margin_end(pad, 10);
+    gtk_widget_set_margin_top(pad, 10);
+    gtk_widget_set_margin_bottom(pad, 10);
+    gtk_box_append(GTK_BOX(outer), pad);
     GtkWidget *content = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
     gtk_widget_set_hexpand(content, TRUE);
 
@@ -745,7 +774,7 @@ void super_v_ui_add_history_item(const char *title, const char *subtitle, int is
         GtkWidget *thumb = make_thumb(preview_image_path, 160);
         gtk_widget_add_css_class(thumb, "clip-image-thumb");
         gtk_widget_set_valign(thumb, GTK_ALIGN_START);
-        gtk_box_append(GTK_BOX(outer), thumb);
+        gtk_box_append(GTK_BOX(pad), thumb);
     }
 
     if (show_body) {
@@ -786,7 +815,7 @@ void super_v_ui_add_history_item(const char *title, const char *subtitle, int is
     gtk_widget_add_css_class(meta, "clip-meta");
     gtk_box_append(GTK_BOX(content), meta);
 
-    gtk_box_append(GTK_BOX(outer), content);
+    gtk_box_append(GTK_BOX(pad), content);
 
     /* Kebab menu, bottom-right. */
     GtkWidget *menu_btn = gtk_menu_button_new();
@@ -815,7 +844,7 @@ void super_v_ui_add_history_item(const char *title, const char *subtitle, int is
     gtk_widget_insert_action_group(row, "row", G_ACTION_GROUP(actions));
     g_object_unref(actions);
 
-    gtk_box_append(GTK_BOX(outer), menu_btn);
+    gtk_box_append(GTK_BOX(pad), menu_btn);
     gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), outer);
 
     if (is_pinned) gtk_widget_add_css_class(row, "pinned-row");
@@ -3950,6 +3979,9 @@ static GtkWidget *create_main_window(AdwApplication *app) {
     gtk_orientable_set_orientation(GTK_ORIENTABLE(g_emoji_chips), GTK_ORIENTATION_HORIZONTAL);
     gtk_widget_set_margin_start(g_emoji_chips, 8);
     gtk_widget_set_margin_end(g_emoji_chips, 8);
+    gtk_widget_add_css_class(g_emoji_chips, "chip-bar");
+    gtk_widget_set_margin_top(g_emoji_chips, 2);
+    gtk_widget_set_margin_bottom(g_emoji_chips, 2);
     gtk_widget_set_visible(g_emoji_chips, FALSE);
     gtk_box_append(GTK_BOX(main_box), g_emoji_chips);
 
