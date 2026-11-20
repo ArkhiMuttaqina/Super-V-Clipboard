@@ -1076,9 +1076,11 @@ fn populate_history(items: Vec<super_v_core::ClipboardItem>) {
         let is_image = item.mime.starts_with("image/");
         /* Images speak for themselves — a bare thumbnail plus a size, no
          * "[image/png]" filename stand-in in the title. */
+        /* Images carry no title at all: the picture is the row. A "[image/png]"
+         * stand-in was pure noise and "Gambar" repeated on every image row. */
         let title = item.text
             .filter(|t| !t.trim().is_empty())
-            .unwrap_or_else(|| if is_image { "Gambar".to_string() } else { format!("[{}]", item.mime) });
+            .unwrap_or_else(|| if is_image { String::new() } else { format!("[{}]", item.mime) });
         let subtitle = if is_image {
             format!("{} KB", (item.byte_size + 1023) / 1024)
         } else {
