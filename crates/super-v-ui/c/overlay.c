@@ -219,7 +219,10 @@ static void install_css(void) {
         ".section-row { background: transparent; box-shadow: none; border: none; padding: 0; min-height: 0; }\n"
         ".section-label { font-weight: 700; font-size: 88%; opacity: 0.6; margin: 10px 6px 2px 6px; }\n"
         ".pin-badge { -gtk-icon-size: 16px; color: #f5c211; margin-top: 2px; }\n"
-        ".clip-image-thumb { border-radius: 8px; padding: 2px; }\n"
+        /* libadwaita constrains row-prefix images to icon size; the GIF cells
+         * already override this the same way. Without it a 96px thumb paints
+         * as a ~16px smudge. */
+        ".clip-image-thumb { -gtk-icon-size: 96px; border-radius: 8px; padding: 2px; }\n"
         ".variant-dot { font-size: 10px; opacity: 0.8; margin-bottom: 0; }\n"
         ".warning-banner { background-color: alpha(@warning_color, 0.18); border-radius: 10px; padding: 8px; }\n"
         ".superv-card { background-color: @window_bg_color; border-radius: 14px; border: 1px solid @borders; box-shadow: 0 8px 28px rgba(0,0,0,0.35); }\n";
@@ -2233,6 +2236,13 @@ static void deliver_thumb(gpointer data) {
     if (ready->img) {
         /* already fitted by the worker; the row was ref'd for exactly this */
         if (ready->pix) gtk_image_set_from_pixbuf(GTK_IMAGE(ready->img), ready->pix);
+        if (g_getenv("SUPER_V_DEBUG_THUMBS")) {
+            g_printerr("THUMB alloc w=%d h=%d pix=%dx%d\n",
+                gtk_widget_get_width(ready->img),
+                gtk_widget_get_height(ready->img),
+                ready->pix ? gdk_pixbuf_get_width(ready->pix) : -1,
+                ready->pix ? gdk_pixbuf_get_height(ready->pix) : -1);
+        }
         g_object_unref(ready->img);
     }
     g_free(ready->key);
