@@ -20,6 +20,7 @@ static gint64 g_show_start_us = 0;
 void super_v_ui_set_start_hidden(int hidden) { g_start_hidden = hidden != 0; }
 static GtkWidget *g_stack = NULL;
 static GtkWidget *g_clip_list = NULL;
+static GtkWidget *g_clear_all_btn = NULL;
 static GtkWidget *g_empty_label = NULL;
 static GtkWidget *g_bridge_banner = NULL;
 static GtkWidget *g_bridge_banner_box = NULL;
@@ -226,12 +227,14 @@ static void install_css(void) {
         ".gif-cell image, .gif-cell picture { -gtk-icon-size: 84px; border-radius: 8px; }\n"
         ".superv-overlay { background: transparent; }\n"
         ".section-row { background: transparent; box-shadow: none; border: none; padding: 0; min-height: 0; }\n"
-        ".clip-row { background: transparent; box-shadow: none; border: none;"
-        " padding: 0; min-height: 0; border-bottom: 1px solid alpha(currentColor, 0.08); }\n"
-        ".clip-row:hover { background-color: alpha(currentColor, 0.05); }\n"
-        ".clip-row.pinned-row { background-color: alpha(#f5c211, 0.06); }\n"
-        ".clip-line { min-height: 0; }\n"
-        ".section-label { font-weight: 700; font-size: 88%; opacity: 0.6; margin: 10px 6px 2px 6px; }\n"
+        ".clip-card { background-color: alpha(currentColor, 0.06); border-radius: 8px; padding: 8px; }\n"
+        ".clip-card:hover { background-color: alpha(currentColor, 0.10); }\n"
+        ".pinned-row .clip-card { background-color: alpha(#f5c211, 0.10); }\n"
+        ".clip-icon-btn { min-width: 24px; min-height: 24px; padding: 0; border-radius: 12px; opacity: 0.55; }\n"
+        ".clip-icon-btn:hover { opacity: 1; }\n"
+        ".clip-rows { background: transparent; }\n"
+        ".clip-rows > row { background: transparent; padding: 3px 8px; border: none; }\n"
+                ".section-label { font-weight: 700; font-size: 88%; opacity: 0.6; margin: 10px 6px 2px 6px; }\n"
         ".pin-badge { -gtk-icon-size: 16px; color: #f5c211; margin-top: 2px; }\n"
         /* libadwaita constrains row-prefix images to icon size; the GIF cells
          * already override this the same way. Without it a 96px thumb paints
@@ -736,89 +739,110 @@ void super_v_ui_add_history_item(const char *title, const char *subtitle, int is
         g_recent_section_added = TRUE;
     }
 
-    /* One continuous list surface: rows are NOT separate cards. Each entry is
-     * a tight line with a hairline separator, which is what a clipboard list
-     * should look like; the previous per-row card with 4px gaps and 10px
-     * padding read as a table of boxes with a giant margin. */
-    GtkWidget *row = gtk_list_box_row_new();
-    gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(row), TRUE);
-    gtk_widget_add_css_class(row, "clip-row");
+    /* Windows 11 Clipboard shape: one card per entry. Text entries are a full
+     * width band with the snippet on top and metadata underneath; image
+     * entries are a thumbnail with the pin/kebab overlay at the top-right.
+     * No rows in the margin between them - the flow box supplies the gaps. */
+    GtkWidget *card = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    gtk_widget_add_css_class(card, "clip-card");
+    /* Rows size to their content; without this the listbox hands the leftover
+     * height to one card and it balloons into a blank band. */
+    gtk_widget_set_vexpand(card, FALSE);
+    gtk_widget_set_valign(card, GTK_ALIGN_START);
 
-    gboolean is_image_row = (preview_image_path && *preview_image_path)
+    gboolean is_image = (preview_image_path && *preview_image_path)
         || (mime && g_str_has_prefix(mime, "image/"));
-    gboolean show_body = !is_image_row && !is_sensitive && title && *title;
+    gboolean has_text = title && title[0] && !is_image && !is_sensitive;
 
-    /* Compact strip: thumb (or nothing) | body + meta | kebab. */
-    GtkWidget *line = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-    gtk_widget_add_css_class(line, "clip-line");
-    gtk_widget_set_margin_start(line, 10);
-    gtk_widget_set_margin_end(line, 6);
-    gtk_widget_set_margin_top(line, 6);
-    gtk_widget_set_margin_bottom(line, 6);
-    if (is_image_row) {
-        gtk_widget_set_margin_top(line, 8);
-        gtk_widget_set_margin_bottom(line, 8);
-    }
-
-    if (is_image_row && preview_image_path && *preview_image_path) {
-        GtkWidget *thumb = make_thumb(preview_image_path, 112);
+    GtkWidget *row;
+    if (is_image && preview_image_path && *preview_image_path) {
+        /* Card is the picture. */
+        GtkWidget *thumb = make_thumb(preview_image_path, 132);
         gtk_widget_add_css_class(thumb, "clip-image-thumb");
-        gtk_widget_set_valign(thumb, GTK_ALIGN_CENTER);
-        gtk_box_append(GTK_BOX(line), thumb);
-    }
+        gtk_widget_set_valign(thumb, GTK_ALIGN_START);
+        gtk_box_append(GTK_BOX(card), thumb);
 
-    GtkWidget *text = gtk_box_new(GTK_ORIENTATION_VERTICAL, 1);
-    gtk_widget_set_hexpand(text, TRUE);
-    gtk_widget_set_valign(text, GTK_ALIGN_CENTER);
+        /* Metadata strip below the picture, like Windows shows it. */
+        GtkWidget *meta = gtk_label_new(subtitle ? subtitle : "");
+        gtk_label_set_xalign(GTK_LABEL(meta), 0.0);
+        gtk_label_set_ellipsize(GTK_LABEL(meta), PANGO_ELLIPSIZE_END);
+        gtk_widget_add_css_class(meta, "clip-meta");
+        gtk_widget_set_margin_start(meta, 6);
+        gtk_widget_set_margin_end(meta, 6);
+        gtk_box_append(GTK_BOX(card), meta);
 
-    if (show_body) {
-        GtkWidget *body = gtk_label_new(title);
-        gtk_label_set_wrap(GTK_LABEL(body), FALSE);
-        gtk_label_set_ellipsize(GTK_LABEL(body), PANGO_ELLIPSIZE_END);
-        gtk_label_set_lines(GTK_LABEL(body), 1);
-        gtk_label_set_xalign(GTK_LABEL(body), 0.0);
-        gtk_widget_add_css_class(body, "clip-body");
-        gtk_box_append(GTK_BOX(text), body);
-    } else if (is_sensitive) {
-        GtkWidget *body = gtk_label_new("Sensitive content hidden");
-        gtk_label_set_xalign(GTK_LABEL(body), 0.0);
-        gtk_widget_add_css_class(body, "dim-label");
-        gtk_box_append(GTK_BOX(text), body);
-    } else if (is_image_row) {
-        /* No placeholder text: the picture is the row. */
-    }
+        row = gtk_list_box_row_new();
+    } else {
+        /* Text band: body above, meta below, full width. */
+        GtkWidget *text = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+        gtk_widget_set_hexpand(text, TRUE);
+        gtk_widget_set_vexpand(text, FALSE);
+        gtk_widget_set_valign(text, GTK_ALIGN_START);
+        gtk_widget_set_margin_start(text, 8);
+        gtk_widget_set_margin_end(text, 8);
+        gtk_widget_set_margin_top(text, 6);
+        gtk_widget_set_margin_bottom(text, 6);
 
-    char stamp[64] = "";
-    if (created_at > 0) {
-        GDateTime *dt = g_date_time_new_from_unix_local((gint64)created_at);
-        if (dt) {
-            char *formatted = g_date_time_format(dt, "%d %b %H:%M");
-            if (formatted) { g_strlcpy(stamp, formatted, sizeof stamp); g_free(formatted); }
-            g_date_time_unref(dt);
+        if (has_text) {
+            GtkWidget *body = gtk_label_new(title);
+            gtk_label_set_wrap(GTK_LABEL(body), TRUE);
+            gtk_label_set_wrap_mode(GTK_LABEL(body), PANGO_WRAP_WORD_CHAR);
+            gtk_label_set_lines(GTK_LABEL(body), 2);
+            gtk_label_set_ellipsize(GTK_LABEL(body), PANGO_ELLIPSIZE_END);
+            gtk_label_set_xalign(GTK_LABEL(body), 0.0);
+            gtk_widget_add_css_class(body, "clip-body");
+            gtk_box_append(GTK_BOX(text), body);
+        } else if (is_sensitive) {
+            GtkWidget *body = gtk_label_new("Sensitive content hidden");
+            gtk_label_set_xalign(GTK_LABEL(body), 0.0);
+            gtk_widget_add_css_class(body, "dim-label");
+            gtk_box_append(GTK_BOX(text), body);
         }
+
+        GtkWidget *meta = gtk_label_new(subtitle ? subtitle : "");
+        gtk_label_set_xalign(GTK_LABEL(meta), 0.0);
+        gtk_label_set_ellipsize(GTK_LABEL(meta), PANGO_ELLIPSIZE_END);
+        gtk_widget_add_css_class(meta, "clip-meta");
+        gtk_box_append(GTK_BOX(text), meta);
+
+        gtk_box_append(GTK_BOX(card), text);
+
+        row = gtk_list_box_row_new();
     }
-    char *meta_text = (subtitle && *subtitle)
-        ? g_strdup_printf("%s%s%s", stamp, stamp[0] ? " · " : "", subtitle)
-        : g_strdup(stamp);
-    GtkWidget *meta = gtk_label_new(meta_text);
-    g_free(meta_text);
-    gtk_label_set_xalign(GTK_LABEL(meta), 0.0);
-    gtk_label_set_ellipsize(GTK_LABEL(meta), PANGO_ELLIPSIZE_END);
-    gtk_widget_add_css_class(meta, "clip-meta");
-    if (meta_text[0]) gtk_box_append(GTK_BOX(text), meta);
 
-    gtk_box_append(GTK_BOX(line), text);
+    /* Overlay controls at the card's top-right: pin dot + kebab. Both are
+     * widgets inside the card so the hit target matches what you see. */
+    GtkWidget *overlay = gtk_overlay_new();
+    gtk_widget_set_vexpand(overlay, FALSE);
+    gtk_widget_set_valign(overlay, GTK_ALIGN_START);
+    gtk_overlay_set_child(GTK_OVERLAY(overlay), card);
+    gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), overlay);
 
-    /* Kebab, vertically centred at the row's right edge. */
+    GtkWidget *controls = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
+    gtk_widget_set_halign(controls, GTK_ALIGN_END);
+    gtk_widget_set_valign(controls, GTK_ALIGN_START);
+    gtk_widget_set_margin_start(controls, 6);
+    gtk_widget_set_margin_end(controls, 6);
+    gtk_widget_set_margin_top(controls, 4);
+
+    GtkWidget *pin = gtk_button_new();
+    gtk_button_set_icon_name(GTK_BUTTON(pin), is_pinned
+        ? "emblem-favorite-symbolic" : "view-pin-symbolic");
+    gtk_widget_add_css_class(pin, "flat");
+    gtk_widget_add_css_class(pin, "clip-icon-btn");
+    gtk_widget_set_tooltip_text(pin, is_pinned ? "Unpin" : "Pin");
+    g_signal_connect(pin, "clicked", G_CALLBACK(on_pin_btn_clicked), row);
+    gtk_box_append(GTK_BOX(controls), pin);
+
     GtkWidget *menu_btn = gtk_menu_button_new();
     gtk_menu_button_set_icon_name(GTK_MENU_BUTTON(menu_btn), "view-more-symbolic");
     gtk_widget_add_css_class(menu_btn, "flat");
-    gtk_widget_set_valign(menu_btn, GTK_ALIGN_CENTER);
+    gtk_widget_add_css_class(menu_btn, "clip-icon-btn");
     gtk_widget_set_tooltip_text(menu_btn, "Actions");
 
     GMenu *menu = g_menu_new();
     GMenu *section = g_menu_new();
-    g_menu_append(section, is_pinned ? "Unpin" : "Pin to top", "row.pin");
+    g_menu_append(section, is_pinned ? "Unpin" : "Pin", "row.pin");
     g_menu_append(section, "Move to top", "row.movetop");
     if (is_sensitive) g_menu_append(section, "Reveal content", "row.reveal");
     g_menu_append_section(menu, NULL, G_MENU_MODEL(section));
@@ -829,14 +853,15 @@ void super_v_ui_add_history_item(const char *title, const char *subtitle, int is
     g_object_unref(section);
     g_object_unref(danger);
     g_object_unref(menu);
-    gtk_box_append(GTK_BOX(line), menu_btn);
+    gtk_box_append(GTK_BOX(controls), menu_btn);
+
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), controls);
+    gtk_widget_set_visible(controls, TRUE);
 
     GSimpleActionGroup *actions = g_simple_action_group_new();
     g_action_map_add_action_entries(G_ACTION_MAP(actions), row_actions, ROW_ACTION_COUNT, row);
     gtk_widget_insert_action_group(row, "row", G_ACTION_GROUP(actions));
     g_object_unref(actions);
-
-    gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), line);
 
     if (is_pinned) gtk_widget_add_css_class(row, "pinned-row");
     g_object_set_data(G_OBJECT(row), "super_v_pinned", GINT_TO_POINTER(is_pinned ? 1 : 0));
@@ -3945,6 +3970,16 @@ static GtkWidget *create_main_window(AdwApplication *app) {
     g_signal_connect(settings_btn, "clicked", G_CALLBACK(on_settings_clicked), window);
     adw_header_bar_pack_end(ADW_HEADER_BAR(top_header), settings_btn);
 
+    /* Windows-style "Clear all" sits in the panel header, not buried in
+     * Settings. It only removes unpinned entries, matching the kebab rules. */
+    g_clear_all_btn = gtk_button_new_with_label("Clear all");
+    gtk_widget_add_css_class(g_clear_all_btn, "flat");
+    gtk_widget_set_tooltip_text(g_clear_all_btn, "Delete all unpinned history");
+    g_signal_connect(g_clear_all_btn, "clicked", G_CALLBACK(on_clear_all_clicked), NULL);
+    adw_header_bar_pack_end(ADW_HEADER_BAR(top_header), g_clear_all_btn);
+
+        adw_header_bar_pack_end(ADW_HEADER_BAR(top_header), settings_btn);
+
     GtkWidget *close_btn = gtk_button_new_from_icon_name("window-close-symbolic");
     gtk_widget_set_tooltip_text(close_btn, "Close (Esc)");
     gtk_widget_add_css_class(close_btn, "flat");
@@ -4028,10 +4063,12 @@ static GtkWidget *create_main_window(AdwApplication *app) {
     g_clip_list = gtk_list_box_new();
     gtk_list_box_set_selection_mode(GTK_LIST_BOX(g_clip_list), GTK_SELECTION_SINGLE);
     gtk_list_box_set_filter_func(GTK_LIST_BOX(g_clip_list), (GtkListBoxFilterFunc)filter_clip_row, NULL, NULL);
-    gtk_widget_add_css_class(g_clip_list, "boxed-list");
-    gtk_widget_set_margin_start(g_clip_list, 10);
-    gtk_widget_set_margin_end(g_clip_list, 10);
-    gtk_widget_set_margin_bottom(g_clip_list, 10);
+    gtk_list_box_set_selection_mode(GTK_LIST_BOX(g_clip_list), GTK_SELECTION_NONE);
+    gtk_widget_add_css_class(g_clip_list, "clip-rows");
+    /* Windows-style: flush to the panel edges, gaps come from the cards. */
+    gtk_widget_set_margin_start(g_clip_list, 0);
+    gtk_widget_set_margin_end(g_clip_list, 0);
+    gtk_widget_set_margin_bottom(g_clip_list, 8);
     g_empty_label = gtk_label_new("Nobody here. Start copying something, lmao.");
     gtk_widget_add_css_class(g_empty_label, "dim-label");
     gtk_widget_set_halign(g_empty_label, GTK_ALIGN_CENTER);
