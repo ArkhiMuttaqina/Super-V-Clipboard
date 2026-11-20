@@ -227,13 +227,15 @@ static void install_css(void) {
         ".gif-cell image, .gif-cell picture { -gtk-icon-size: 84px; border-radius: 8px; }\n"
         ".superv-overlay { background: transparent; }\n"
         ".section-row { background: transparent; box-shadow: none; border: none; padding: 0; min-height: 0; }\n"
-        ".clip-card { background-color: alpha(currentColor, 0.06); border-radius: 8px; padding: 8px; }\n"
-        ".clip-card:hover { background-color: alpha(currentColor, 0.10); }\n"
-        ".pinned-row .clip-card { background-color: alpha(#f5c211, 0.10); }\n"
+        ".clip-card { background-color: @card_bg_color; border-radius: 8px;"
+        " padding: 8px; border: 1px solid alpha(currentColor, 0.06); }\n"
+        ".clip-card:hover { background-color: alpha(@accent_bg_color, 0.12); }\n"
+        ".pinned-row .clip-card { background-color: alpha(#f5c211, 0.04); box-shadow: inset 3px 0 0 #f5c211; }\n"
+        ".clip-clear-all { opacity: 0.6; font-size: 88%; }\n"
         ".clip-icon-btn { min-width: 24px; min-height: 24px; padding: 0; border-radius: 12px; opacity: 0.55; }\n"
         ".clip-icon-btn:hover { opacity: 1; }\n"
         ".clip-rows { background: transparent; }\n"
-        ".clip-rows > row { background: transparent; padding: 3px 8px; border: none; }\n"
+        ".clip-rows > row { background: transparent; padding: 2px 6px; border: none; }\n"
                 ".section-label { font-weight: 700; font-size: 88%; opacity: 0.6; margin: 10px 6px 2px 6px; }\n"
         ".pin-badge { -gtk-icon-size: 16px; color: #f5c211; margin-top: 2px; }\n"
         /* libadwaita constrains row-prefix images to icon size; the GIF cells
@@ -759,6 +761,8 @@ void super_v_ui_add_history_item(const char *title, const char *subtitle, int is
         /* Card is the picture. */
         GtkWidget *thumb = make_thumb(preview_image_path, 132);
         gtk_widget_add_css_class(thumb, "clip-image-thumb");
+        gtk_widget_set_halign(thumb, GTK_ALIGN_FILL);
+        gtk_widget_set_hexpand(thumb, TRUE);
         gtk_widget_set_valign(thumb, GTK_ALIGN_START);
         gtk_box_append(GTK_BOX(card), thumb);
 
@@ -3970,16 +3974,6 @@ static GtkWidget *create_main_window(AdwApplication *app) {
     g_signal_connect(settings_btn, "clicked", G_CALLBACK(on_settings_clicked), window);
     adw_header_bar_pack_end(ADW_HEADER_BAR(top_header), settings_btn);
 
-    /* Windows-style "Clear all" sits in the panel header, not buried in
-     * Settings. It only removes unpinned entries, matching the kebab rules. */
-    g_clear_all_btn = gtk_button_new_with_label("Clear all");
-    gtk_widget_add_css_class(g_clear_all_btn, "flat");
-    gtk_widget_set_tooltip_text(g_clear_all_btn, "Delete all unpinned history");
-    g_signal_connect(g_clear_all_btn, "clicked", G_CALLBACK(on_clear_all_clicked), NULL);
-    adw_header_bar_pack_end(ADW_HEADER_BAR(top_header), g_clear_all_btn);
-
-        adw_header_bar_pack_end(ADW_HEADER_BAR(top_header), settings_btn);
-
     GtkWidget *close_btn = gtk_button_new_from_icon_name("window-close-symbolic");
     gtk_widget_set_tooltip_text(close_btn, "Close (Esc)");
     gtk_widget_add_css_class(close_btn, "flat");
@@ -3997,6 +3991,18 @@ static GtkWidget *create_main_window(AdwApplication *app) {
         "Search clipboard, emoji (sad, marah, cinta), symbols...");
     g_signal_connect(g_search_entry, "search-changed", G_CALLBACK(on_search_changed), NULL);
     gtk_box_append(GTK_BOX(main_box), g_search_entry);
+
+    /* "Clear all" lives under the search bar — that is where Windows puts it. */
+    g_clear_all_btn = gtk_button_new_with_label("Clear all history");
+    gtk_widget_add_css_class(g_clear_all_btn, "flat");
+    gtk_widget_add_css_class(g_clear_all_btn, "clip-clear-all");
+    gtk_widget_set_tooltip_text(g_clear_all_btn, "Remove all unpinned entries");
+    gtk_widget_set_halign(g_clear_all_btn, GTK_ALIGN_FILL);
+    gtk_widget_set_margin_start(g_clear_all_btn, 10);
+    gtk_widget_set_margin_end(g_clear_all_btn, 10);
+    gtk_widget_set_margin_bottom(g_clear_all_btn, 4);
+    g_signal_connect(g_clear_all_btn, "clicked", G_CALLBACK(on_clear_all_clicked), NULL);
+    gtk_box_append(GTK_BOX(main_box), g_clear_all_btn);
     /* Emoji category chips, built from the dataset's CLDR group list. */
     g_emoji_chips = gtk_flow_box_new();
     gtk_flow_box_set_max_children_per_line(GTK_FLOW_BOX(g_emoji_chips), 5);
