@@ -156,7 +156,7 @@ typedef struct { char *text; } PasteAction;
 static gboolean do_paste_action(gpointer data);
 static void paste_image_after_hide(const char *path);
 
-static void on_history_row_activated(AdwActionRow *row, gpointer data);
+static void on_history_row_activated(GtkWidget *row, gpointer data);
 static void sync_clipboard_once(void);
 static gboolean sync_clipboard_idle(gpointer data);
 static void request_pointer_placement(void);
@@ -333,7 +333,7 @@ static void on_row_click_released(GtkGestureClick *gesture, int n_press, double 
             return;
         }
     }
-    on_history_row_activated(ADW_ACTION_ROW(row), NULL);
+    on_history_row_activated(row, NULL);
 }
 static gboolean g_last_paste_had_texture = FALSE;
 static gboolean g_last_paste_had_gif = FALSE;
@@ -479,7 +479,7 @@ static void paste_image_after_hide(const char *path) {
     paste_file_after_hide(path, NULL);
 }
 
-static void on_history_row_activated(AdwActionRow *row, gpointer data) {
+static void on_history_row_activated(GtkWidget *row, gpointer data) {
     (void)data;
     gint64 now = g_get_monotonic_time();
     if (now - g_last_pick_us < 300000) return;   /* one pick per gesture */
