@@ -238,7 +238,7 @@ static void install_css(void) {
          * as a ~16px smudge. */
         /* The GtkImage prefix is clamped by -gtk-icon-size, and the value has
          * to track make_thumb()'s size or the picture paints small again. */
-        ".clip-image-thumb { -gtk-icon-size: 56px; border-radius: 6px; }\n"
+        ".clip-image-thumb { -gtk-icon-size: 112px; border-radius: 8px; }\n"
         ".clip-body { font-size: 0.98em; }\n"
         ".clip-meta { font-size: 78%; opacity: 0.5; margin-top: 1px; }\n"
         ".emoji-chip { font-size: 84%; padding: 2px 10px; min-height: 26px;"
@@ -755,9 +755,13 @@ void super_v_ui_add_history_item(const char *title, const char *subtitle, int is
     gtk_widget_set_margin_end(line, 6);
     gtk_widget_set_margin_top(line, 6);
     gtk_widget_set_margin_bottom(line, 6);
+    if (is_image_row) {
+        gtk_widget_set_margin_top(line, 8);
+        gtk_widget_set_margin_bottom(line, 8);
+    }
 
     if (is_image_row && preview_image_path && *preview_image_path) {
-        GtkWidget *thumb = make_thumb(preview_image_path, 56);
+        GtkWidget *thumb = make_thumb(preview_image_path, 112);
         gtk_widget_add_css_class(thumb, "clip-image-thumb");
         gtk_widget_set_valign(thumb, GTK_ALIGN_CENTER);
         gtk_box_append(GTK_BOX(line), thumb);
