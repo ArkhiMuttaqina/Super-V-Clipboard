@@ -10,6 +10,7 @@ use super_v_core::glyphs::GlyphIndex;
 type PasteCallback = extern "C" fn(id: libc::c_longlong, text: *const c_char);
 type PinCallback = extern "C" fn(id: libc::c_longlong);
 type DeleteCallback = extern "C" fn(id: libc::c_longlong);
+type MoveTopCallback = extern "C" fn(id: libc::c_longlong);
 type GlyphProvider = extern "C" fn(tab: *const c_char, query: *const c_char, offset: c_int, limit: c_int) -> c_int;
 type GlyphVariantsProvider = extern "C" fn(glyph: *const c_char, out: *mut c_char, cap: c_int) -> c_int;
 type ActivateHook = extern "C" fn();
@@ -31,6 +32,7 @@ extern "C" {
     fn super_v_ui_set_paste_callback(cb: PasteCallback);
     fn super_v_ui_set_pin_callback(cb: PinCallback);
     fn super_v_ui_set_delete_callback(cb: DeleteCallback);
+    fn super_v_ui_set_move_top_callback(cb: MoveTopCallback);
     fn super_v_ui_set_glyph_provider(cb: GlyphProvider);
     fn super_v_ui_set_glyph_variants_provider(cb: GlyphVariantsProvider);
     fn super_v_ui_set_activate_hook(cb: ActivateHook);
@@ -1013,6 +1015,19 @@ extern "C" fn on_paste_selected(id: libc::c_longlong, text_ptr: *const c_char) {
     }
 }
 
+extern "C" fn on_move_to_top(id: libc::c_longlong) {
+    if let Some(rt) = worker() {
+        rt.spawn(async move {
+            if let Ok(mut client) = super_v_core::ipc_client::IpcClient::connect(SOCKET).await {
+                match client.move_to_top(id as i64).await {
+                    Ok(()) => append_log(&format!("move_to_top({}) ok", id)),
+                    Err(e) => append_log(&format!("move_to_top({}) failed: {}", id, e)),
+                }
+            }
+        });
+    }
+}
+
 extern "C" fn on_pin_toggled(id: libc::c_longlong) {
     if let Some(rt) = worker() {
         rt.spawn(async move {
@@ -1329,6 +1344,7 @@ fn main() -> Result<()> {
         super_v_ui_set_paste_callback(on_paste_selected);
         super_v_ui_set_pin_callback(on_pin_toggled);
         super_v_ui_set_delete_callback(on_delete_item);
+        super_v_ui_set_move_top_callback(on_move_to_top);
         super_v_ui_set_glyph_provider(provide_glyph_page);
         super_v_ui_set_glyph_variants_provider(provide_glyph_variants);
         super_v_ui_set_activate_hook(on_primary_activated);

@@ -19,6 +19,7 @@ typedef void (*AiTestHook)(void);
 typedef void (*AiModelsHook)(const char *csv);
 typedef void (*AiRefreshHook)(void);
 typedef void (*DeleteCallback)(long long id);
+typedef void (*MoveTopCallback)(long long id);
 
 /* Lazy glyph provider. Fills rows [offset, offset+limit) for the given tab.
    An empty/NULL query means "the whole tab"; otherwise the query is a
@@ -74,6 +75,7 @@ void super_v_ui_ai_stream_delta(const char *text);
 void super_v_ui_ai_stream_done(void);
 void super_v_ui_set_ai_status(const char *text);
 void super_v_ui_set_delete_callback(DeleteCallback cb);
+void super_v_ui_set_move_top_callback(MoveTopCallback cb);
 void super_v_ui_set_glyph_provider(GlyphProvider cb);
 void super_v_ui_set_glyph_variants_provider(GlyphVariantsProvider cb);
 void super_v_ui_set_activate_hook(ActivateHook cb);

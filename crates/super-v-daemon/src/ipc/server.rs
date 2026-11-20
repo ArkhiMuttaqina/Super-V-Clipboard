@@ -19,6 +19,7 @@ fn request_kind(line: &str) -> String {
         Ok(IpcRequest::TogglePin { id }) => format!("TogglePin({})", id),
         Ok(IpcRequest::DeleteItem { id }) => format!("DeleteItem({})", id),
         Ok(IpcRequest::ClearAll) => "ClearAll".to_string(),
+        Ok(IpcRequest::MoveToTop { id }) => format!("MoveToTop({})", id),
         Ok(IpcRequest::PurgeOlderThan { seconds }) => format!("PurgeOlderThan({}s)", seconds),
         Ok(IpcRequest::ClearUnpinned) => "ClearUnpinned".to_string(),
         Ok(IpcRequest::Search { query, limit }) => format!("Search({:?}, {})", query, limit),
@@ -121,6 +122,13 @@ impl IpcServer {
                 Ok(IpcRequest::ClearUnpinned) => {
                     let mut db = db.lock().await;
                     match db.clear_unpinned() {
+                        Ok(_) => IpcResponse::Ack,
+                        Err(e) => IpcResponse::Error(e.to_string()),
+                    }
+                }
+                Ok(IpcRequest::MoveToTop { id }) => {
+                    let mut db = db.lock().await;
+                    match db.move_to_top(id) {
                         Ok(_) => IpcResponse::Ack,
                         Err(e) => IpcResponse::Error(e.to_string()),
                     }

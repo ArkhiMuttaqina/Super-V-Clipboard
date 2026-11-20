@@ -91,6 +91,14 @@ impl IpcClient {
         }
     }
 
+    pub async fn move_to_top(&mut self, id: i64) -> Result<()> {
+        match self.send_request(&IpcRequest::MoveToTop { id }).await? {
+            IpcResponse::Ack => Ok(()),
+            IpcResponse::Error(e) => Err(anyhow!("Daemon error: {}", e)),
+            other => Err(anyhow!("Unexpected response: {:?}", other)),
+        }
+    }
+
     pub async fn clear_all(&mut self) -> Result<usize> {
         match self.send_request(&IpcRequest::ClearAll).await? {
             IpcResponse::PurgeResult { deleted } => Ok(deleted),

@@ -79,6 +79,7 @@ static GtkWidget *g_gif_combo = NULL;
 
 static PasteCallback g_paste_cb = NULL;
 static PinCallback g_pin_cb = NULL;
+static MoveTopCallback g_move_top_cb = NULL;
 static RefreshHook g_refresh_hook = NULL;
 static UpdateHook g_live_update_hook = NULL;
 static DeleteCallback g_delete_cb = NULL;
@@ -166,6 +167,7 @@ static void reload_glyphs(const char *tab);
 
 void super_v_ui_set_paste_callback(PasteCallback cb) { g_paste_cb = cb; }
 void super_v_ui_set_pin_callback(PinCallback cb) { g_pin_cb = cb; }
+void super_v_ui_set_move_top_callback(MoveTopCallback cb) { g_move_top_cb = cb; }
 void super_v_ui_set_refresh_hook(RefreshHook cb) { g_refresh_hook = cb; }
 void super_v_ui_set_live_update_hook(UpdateHook cb) { g_live_update_hook = cb; }
 void super_v_ui_set_delete_callback(DeleteCallback cb) { g_delete_cb = cb; }
@@ -504,6 +506,14 @@ static void on_pin_btn_clicked(GtkButton *btn, gpointer user_data) {
     g_idle_add(refresh_history_idle, NULL);
 }
 
+static void on_move_top_btn_clicked(GtkButton *btn, gpointer user_data) {
+    (void)btn;
+    GtkWidget *row = GTK_WIDGET(user_data);
+    gint64 *pid = (gint64 *)g_object_get_data(G_OBJECT(row), "super_v_id");
+    if (pid && g_move_top_cb) g_move_top_cb((long long)*pid);
+    g_idle_add(refresh_history_idle, NULL);
+}
+
 static void on_delete_btn_clicked(GtkButton *btn, gpointer user_data) {
     (void)btn;
     GtkWidget *row = GTK_WIDGET(user_data);
@@ -714,11 +724,11 @@ void super_v_ui_add_history_item(const char *title, const char *subtitle, int is
         /* Images lead with the picture, not a filename: a 96px crop is
          * recognizable at a glance, and the mime label is noise. */
         GtkWidget *thumb = (preview_image_path && *preview_image_path)
-            ? make_thumb(preview_image_path, 96) : NULL;
+            ? make_thumb(preview_image_path, 128) : NULL;
         if (thumb) {
             gtk_widget_add_css_class(thumb, "clip-image-thumb");
             adw_action_row_add_prefix(ADW_ACTION_ROW(row), thumb);
-            gtk_widget_set_size_request(GTK_WIDGET(row), -1, 104);
+            gtk_widget_set_size_request(GTK_WIDGET(row), -1, 136);
         } else {
             GtkWidget *icon = gtk_image_new_from_icon_name("image-x-generic-symbolic");
             gtk_image_set_pixel_size(GTK_IMAGE(icon), 48);
@@ -726,7 +736,7 @@ void super_v_ui_add_history_item(const char *title, const char *subtitle, int is
         }
     }
 
-    if (is_pinned) {
+    if (FALSE) {
         GtkWidget *pin = gtk_image_new_from_icon_name("starred-symbolic");
         gtk_image_set_pixel_size(GTK_IMAGE(pin), 16);
         gtk_widget_set_tooltip_text(pin, "Pinned — never auto-deleted");
@@ -1808,7 +1818,7 @@ void super_v_ui_show_settings(void *parent_window) {
 
     GtkWidget *clear_row = adw_action_row_new();
     adw_preferences_row_set_title(ADW_PREFERENCES_ROW(clear_row), "Delete all history");
-    adw_action_row_set_subtitle(ADW_ACTION_ROW(clear_row), "Removes every entry, pinned included");
+    adw_action_row_set_subtitle(ADW_ACTION_ROW(clear_row), "Removes every entry except pinned ones");
     GtkWidget *clear_btn = gtk_button_new_with_label("Delete All");
     gtk_widget_add_css_class(clear_btn, "destructive-action");
     gtk_widget_set_valign(clear_btn, GTK_ALIGN_CENTER);
@@ -3193,8 +3203,8 @@ static void on_clear_all_chosen(GObject *source, GAsyncResult *result, gpointer 
 static void on_clear_all_clicked(GtkButton *btn, gpointer user_data) {
     (void)btn; (void)user_data;
     AdwAlertDialog *dlg = ADW_ALERT_DIALOG(adw_alert_dialog_new(
-        "Delete all clipboard history?",
-        "Every row, pinned ones included, and its blob on disk is removed. This cannot be undone."));
+        "Delete all history?",
+        "Every unpinned row and its blob on disk is removed. Pinned items are kept. This cannot be undone."));
     adw_alert_dialog_add_response(dlg, "cancel", "Cancel");
     adw_alert_dialog_add_response(dlg, "delete", "Delete All");
     adw_alert_dialog_set_response_appearance(dlg, "delete", ADW_RESPONSE_DESTRUCTIVE);

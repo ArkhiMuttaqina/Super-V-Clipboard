@@ -16,8 +16,10 @@ pub enum IpcRequest {
     DeleteItem { id: i64 },
     /// Clear all unpinned items
     ClearUnpinned,
-    /// Delete every item, pinned included
+    /// Delete every unpinned item; pinned rows survive
     ClearAll,
+    /// Refresh a row's timestamp so it sorts first
+    MoveToTop { id: i64 },
     /// Drop items older than `seconds` (History Vanish); pinned rows stay
     PurgeOlderThan { seconds: u64 },
     /// Search items via SQLite FTS5

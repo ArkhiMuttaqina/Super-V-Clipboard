@@ -214,18 +214,33 @@ impl Database {
         Ok(count)
     }
 
-    /// Delete every row (including pinned) plus its blob files.
+    /// Delete every *unpinned* row plus its blob. Pinned rows survive: "Delete
+    /// All" in the UI means "clear my history", and an entry was pinned
+    /// precisely to outlive that.
     pub fn clear_all(&mut self) -> Result<usize> {
         let blobs: Vec<Option<String>> = {
-            let mut stmt = self.conn.prepare("SELECT blob_path FROM entries")?;
+            let mut stmt = self.conn.prepare(
+                "SELECT blob_path FROM entries WHERE is_pinned = 0",
+            )?;
             let rows = stmt.query_map([], |r| r.get(0))?;
             rows.filter_map(|res| res.ok()).collect()
         };
         for path in blobs.into_iter().flatten() {
             let _ = std::fs::remove_file(path);
         }
-        let count = self.conn.execute("DELETE FROM entries", [])?;
+        let count = self.conn.execute("DELETE FROM entries WHERE is_pinned = 0", [])?;
         Ok(count)
+    }
+
+    /// Bump a row to the front of the history by refreshing its timestamp.
+    /// Ordering everywhere is `created_at DESC`, so this needs no extra column.
+    pub fn move_to_top(&mut self, id: i64) -> Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs() as i64;
+        self.conn
+            .execute("UPDATE entries SET created_at = ?1 WHERE id = ?2", params![now, id])?;
+        Ok(())
     }
 
     /// Drop rows created before `cutoff` (unix seconds) unless pinned,
