@@ -506,6 +506,47 @@ static void on_pin_btn_clicked(GtkButton *btn, gpointer user_data) {
     g_idle_add(refresh_history_idle, NULL);
 }
 
+/* Kebab-menu actions. GSimpleAction callbacks take (action, param, data), so
+ * they forward to the existing button handlers with the row as user_data. */
+static void row_action_pin(GSimpleAction *a, GVariant *p, gpointer row) {
+    (void)a; (void)p;
+    gint64 *pid = (gint64 *)g_object_get_data(G_OBJECT(row), "super_v_id");
+    if (pid && g_pin_cb) g_pin_cb((long long)*pid);
+    g_idle_add(refresh_history_idle, NULL);
+}
+
+static void row_action_movetop(GSimpleAction *a, GVariant *p, gpointer row) {
+    (void)a; (void)p;
+    gint64 *pid = (gint64 *)g_object_get_data(G_OBJECT(row), "super_v_id");
+    if (pid && g_move_top_cb) g_move_top_cb((long long)*pid);
+    g_idle_add(refresh_history_idle, NULL);
+}
+
+static void row_action_delete(GSimpleAction *a, GVariant *p, gpointer row) {
+    (void)a; (void)p;
+    GtkWidget *list = gtk_widget_get_parent(GTK_WIDGET(row));
+    gint64 *pid = (gint64 *)g_object_get_data(G_OBJECT(row), "super_v_id");
+    if (pid && g_delete_cb) g_delete_cb((long long)*pid);
+    if (list && GTK_IS_LIST_BOX(list)) gtk_list_box_remove(GTK_LIST_BOX(list), GTK_WIDGET(row));
+}
+
+static void row_action_reveal(GSimpleAction *a, GVariant *p, gpointer row) {
+    (void)a; (void)p;
+    const char *masked = g_object_get_data(G_OBJECT(row), "super_v_masked");
+    GtkWidget *content = gtk_widget_get_first_child(gtk_widget_get_first_child(GTK_WIDGET(row)));
+    if (!masked || !content) return;
+    GtkWidget *body = gtk_widget_get_first_child(content);
+    if (body && GTK_IS_LABEL(body)) gtk_label_set_text(GTK_LABEL(body), masked);
+}
+
+static const GActionEntry row_actions[] = {
+    { "pin",     row_action_pin,     NULL, NULL, NULL },
+    { "movetop", row_action_movetop, NULL, NULL, NULL },
+    { "delete",  row_action_delete,  NULL, NULL, NULL },
+    { "reveal",  row_action_reveal,  NULL, NULL, NULL },
+};
+#define ROW_ACTION_COUNT G_N_ELEMENTS(row_actions)
+
 static void on_move_top_btn_clicked(GtkButton *btn, gpointer user_data) {
     (void)btn;
     GtkWidget *row = GTK_WIDGET(user_data);
@@ -675,98 +716,117 @@ void super_v_ui_add_history_item(const char *title, const char *subtitle, int is
         g_recent_section_added = TRUE;
     }
 
-    AdwActionRow *row = ADW_ACTION_ROW(adw_action_row_new());
-    adw_preferences_row_set_use_markup(ADW_PREFERENCES_ROW(row), FALSE);
+    /* Rows are plain GtkListBoxRow + GtkBox, not AdwActionRow: the content is
+     * a large image or up to four lines of text, with a meta line under it and
+     * a kebab menu in the bottom-right corner. AdwActionRow clamps prefixes to
+     * icon size and has nowhere to put the actions except a suffix strip. */
+    GtkWidget *row = gtk_list_box_row_new();
+    gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(row), TRUE);
+    GtkWidget *outer = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+    gtk_widget_set_margin_start(outer, 12);
+    gtk_widget_set_margin_end(outer, 8);
+    gtk_widget_set_margin_top(outer, 8);
+    gtk_widget_set_margin_bottom(outer, 8);
+    GtkWidget *content = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+    gtk_widget_set_hexpand(content, TRUE);
 
-    if (is_sensitive) {
-        char *masked = g_strdup(title ? title : "");
-        /* Keep only a short recognizable prefix, mask the rest. */
-        gsize len = strlen(masked);
-        if (len > 4) {
-            for (gsize i = 3; i < len; i++) masked[i] = '*';
+    gboolean is_image = (preview_image_path && *preview_image_path)
+        || (mime && g_str_has_prefix(mime, "image/"));
+    gboolean show_body = !is_image && !is_sensitive && title && *title;
+
+    if (is_image && preview_image_path && *preview_image_path) {
+        GtkWidget *thumb = make_thumb(preview_image_path, 160);
+        gtk_widget_add_css_class(thumb, "clip-image-thumb");
+        gtk_widget_set_valign(thumb, GTK_ALIGN_START);
+        gtk_box_append(GTK_BOX(outer), thumb);
+    }
+
+    if (show_body) {
+        /* Four lines max, wrapped, then ellipsized. */
+        GtkWidget *body = gtk_label_new(title);
+        gtk_label_set_wrap(GTK_LABEL(body), TRUE);
+        gtk_label_set_wrap_mode(GTK_LABEL(body), PANGO_WRAP_WORD_CHAR);
+        gtk_label_set_lines(GTK_LABEL(body), 4);
+        gtk_label_set_ellipsize(GTK_LABEL(body), PANGO_ELLIPSIZE_END);
+        gtk_label_set_xalign(GTK_LABEL(body), 0.0);
+        gtk_label_set_yalign(GTK_LABEL(body), 0.0);
+        gtk_widget_add_css_class(body, "clip-body");
+        gtk_box_append(GTK_BOX(content), body);
+    } else if (is_sensitive) {
+        GtkWidget *body = gtk_label_new("Sensitive content hidden");
+        gtk_label_set_xalign(GTK_LABEL(body), 0.0);
+        gtk_widget_add_css_class(body, "dim-label");
+        gtk_box_append(GTK_BOX(content), body);
+    }
+
+    /* Date and size on their own line, under the content. */
+    char stamp[64] = "";
+    if (created_at > 0) {
+        GDateTime *dt = g_date_time_new_from_unix_local((gint64)created_at);
+        if (dt) {
+            char *formatted = g_date_time_format(dt, "%d %b %H:%M");
+            if (formatted) { g_strlcpy(stamp, formatted, sizeof stamp); g_free(formatted); }
+            g_date_time_unref(dt);
         }
-        g_object_set_data_full(G_OBJECT(row), "super_v_masked", masked, g_free);
-        char *markup = history_markup(title, created_at, is_pinned);
-        adw_preferences_row_set_use_markup(ADW_PREFERENCES_ROW(row), TRUE);
-        adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row), markup);
-        g_free(markup);
-        g_object_set_data(G_OBJECT(row), "super_v_revealed", GINT_TO_POINTER(1));
-    } else {
-        char *markup = history_markup(title, created_at, is_pinned);
-        adw_preferences_row_set_use_markup(ADW_PREFERENCES_ROW(row), TRUE);
-        adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row), markup);
-        g_free(markup);
     }
+    char *meta_text = (subtitle && *subtitle)
+        ? g_strdup_printf("%s%s%s", stamp, stamp[0] ? "  ·  " : "", subtitle)
+        : g_strdup(stamp);
+    GtkWidget *meta = gtk_label_new(meta_text);
+    g_free(meta_text);
+    gtk_label_set_xalign(GTK_LABEL(meta), 0.0);
+    gtk_label_set_ellipsize(GTK_LABEL(meta), PANGO_ELLIPSIZE_END);
+    gtk_widget_add_css_class(meta, "clip-meta");
+    gtk_box_append(GTK_BOX(content), meta);
 
-    if (subtitle && *subtitle) {
-        adw_action_row_set_subtitle(ADW_ACTION_ROW(row), subtitle);
-    }
+    gtk_box_append(GTK_BOX(outer), content);
+
+    /* Kebab menu, bottom-right. */
+    GtkWidget *menu_btn = gtk_menu_button_new();
+    gtk_menu_button_set_icon_name(GTK_MENU_BUTTON(menu_btn), "view-more-symbolic");
+    gtk_widget_add_css_class(menu_btn, "flat");
+    gtk_widget_set_valign(menu_btn, GTK_ALIGN_END);
+    gtk_widget_set_halign(menu_btn, GTK_ALIGN_END);
+    gtk_widget_set_tooltip_text(menu_btn, "Actions");
+
+    GMenu *menu = g_menu_new();
+    GMenu *section = g_menu_new();
+    g_menu_append(section, is_pinned ? "Unpin" : "Pin to top", "row.pin");
+    g_menu_append(section, "Move to top", "row.movetop");
+    if (is_sensitive) g_menu_append(section, "Reveal content", "row.reveal");
+    g_menu_append_section(menu, NULL, G_MENU_MODEL(section));
+    GMenu *danger = g_menu_new();
+    g_menu_append(danger, "Delete", "row.delete");
+    g_menu_append_section(menu, NULL, G_MENU_MODEL(danger));
+    gtk_menu_button_set_menu_model(GTK_MENU_BUTTON(menu_btn), G_MENU_MODEL(menu));
+    g_object_unref(section);
+    g_object_unref(danger);
+    g_object_unref(menu);
+
+    GSimpleActionGroup *actions = g_simple_action_group_new();
+    g_action_map_add_action_entries(G_ACTION_MAP(actions), row_actions, ROW_ACTION_COUNT, row);
+    gtk_widget_insert_action_group(row, "row", G_ACTION_GROUP(actions));
+    g_object_unref(actions);
+
+    gtk_box_append(GTK_BOX(outer), menu_btn);
+    gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), outer);
+
+    if (is_pinned) gtk_widget_add_css_class(row, "pinned-row");
     g_object_set_data(G_OBJECT(row), "super_v_pinned", GINT_TO_POINTER(is_pinned ? 1 : 0));
     if (mime) g_object_set_data_full(G_OBJECT(row), "super_v_mime", g_strdup(mime), g_free);
     if (preview_image_path) g_object_set_data_full(G_OBJECT(row), "super_v_blob", g_strdup(preview_image_path), g_free);
-    if (is_pinned) {
-        gtk_widget_add_css_class(GTK_WIDGET(row), "pinned-row");
-    }
-
     g_object_set_data_full(G_OBJECT(row), "super_v_text", g_strdup(title ? title : ""), g_free);
-    g_signal_connect(row, "activated", G_CALLBACK(on_history_row_activated), NULL);
-    GtkGesture *row_click = gtk_gesture_click_new();
-    gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(row_click), GDK_BUTTON_PRIMARY);
-    g_signal_connect(row_click, "released", G_CALLBACK(on_row_click_released), row);
-    gtk_widget_add_controller(GTK_WIDGET(row), GTK_EVENT_CONTROLLER(row_click));
     gint64 *heap_id = g_new0(gint64, 1);
     *heap_id = (gint64)id;
     g_object_set_data_full(G_OBJECT(row), "super_v_id", heap_id, g_free);
 
-    gboolean is_image = (preview_image_path && *preview_image_path)
-        || (mime && g_str_has_prefix(mime, "image/"));
-    if (is_image) {
-        /* Images lead with the picture, not a filename: a 96px crop is
-         * recognizable at a glance, and the mime label is noise. */
-        GtkWidget *thumb = (preview_image_path && *preview_image_path)
-            ? make_thumb(preview_image_path, 128) : NULL;
-        if (thumb) {
-            gtk_widget_add_css_class(thumb, "clip-image-thumb");
-            adw_action_row_add_prefix(ADW_ACTION_ROW(row), thumb);
-            gtk_widget_set_size_request(GTK_WIDGET(row), -1, 136);
-        } else {
-            GtkWidget *icon = gtk_image_new_from_icon_name("image-x-generic-symbolic");
-            gtk_image_set_pixel_size(GTK_IMAGE(icon), 48);
-            adw_action_row_add_prefix(ADW_ACTION_ROW(row), icon);
-        }
-    }
+    g_signal_connect(row, "activated", G_CALLBACK(on_history_row_activated), NULL);
+    GtkGesture *row_click = gtk_gesture_click_new();
+    gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(row_click), GDK_BUTTON_PRIMARY);
+    g_signal_connect(row_click, "released", G_CALLBACK(on_row_click_released), row);
+    gtk_widget_add_controller(row, GTK_EVENT_CONTROLLER(row_click));
 
-    if (FALSE) {
-        GtkWidget *pin = gtk_image_new_from_icon_name("starred-symbolic");
-        gtk_image_set_pixel_size(GTK_IMAGE(pin), 16);
-        gtk_widget_set_tooltip_text(pin, "Pinned — never auto-deleted");
-        gtk_widget_add_css_class(pin, "pin-badge");
-        gtk_widget_set_valign(pin, GTK_ALIGN_CENTER);
-        adw_action_row_add_suffix(ADW_ACTION_ROW(row), pin);
-    }
-
-    if (is_sensitive) {
-        GtkWidget *eye = gtk_button_new_from_icon_name("view-conceal-symbolic");
-        gtk_widget_add_css_class(eye, "flat");
-        gtk_widget_set_tooltip_text(eye, "Hide Sensitive Content");
-        g_signal_connect(eye, "clicked", G_CALLBACK(on_eye_btn_clicked), row);
-        adw_action_row_add_suffix(ADW_ACTION_ROW(row), eye);
-    }
-
-    GtkWidget *pin_btn = gtk_button_new_from_icon_name(is_pinned ? "view-pin-symbolic" : "view-pin-symbolic");
-    gtk_widget_add_css_class(pin_btn, "flat");
-    gtk_widget_set_tooltip_text(pin_btn, is_pinned ? "Unpin" : "Pin");
-    g_signal_connect(pin_btn, "clicked", G_CALLBACK(on_pin_btn_clicked), row);
-    adw_action_row_add_suffix(ADW_ACTION_ROW(row), pin_btn);
-
-    GtkWidget *del_btn = gtk_button_new_from_icon_name("user-trash-symbolic");
-    gtk_widget_add_css_class(del_btn, "flat");
-    gtk_widget_set_tooltip_text(del_btn, "Delete");
-    g_signal_connect(del_btn, "clicked", G_CALLBACK(on_delete_btn_clicked), row);
-    adw_action_row_add_suffix(ADW_ACTION_ROW(row), del_btn);
-
-    tame_row_labels(GTK_WIDGET(row));
-    gtk_list_box_append(GTK_LIST_BOX(g_clip_list), GTK_WIDGET(row));
+    gtk_list_box_append(GTK_LIST_BOX(g_clip_list), row);
 }
 
 void super_v_ui_clear_history_items(void) {
