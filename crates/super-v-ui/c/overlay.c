@@ -762,6 +762,8 @@ void super_v_ui_add_history_item(const char *title, const char *subtitle, int is
     gtk_widget_set_margin_end(pad, 10);
     gtk_widget_set_margin_top(pad, 10);
     gtk_widget_set_margin_bottom(pad, 10);
+    gtk_widget_set_hexpand(pad, TRUE);
+    gtk_widget_set_halign(pad, GTK_ALIGN_FILL);
     gtk_box_append(GTK_BOX(outer), pad);
     GtkWidget *content = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
     gtk_widget_set_hexpand(content, TRUE);
@@ -3974,7 +3976,10 @@ static GtkWidget *create_main_window(AdwApplication *app) {
     gtk_box_append(GTK_BOX(main_box), g_search_entry);
     /* Emoji category chips, built from the dataset's CLDR group list. */
     g_emoji_chips = gtk_flow_box_new();
-    gtk_flow_box_set_max_children_per_line(GTK_FLOW_BOX(g_emoji_chips), 16);
+    gtk_flow_box_set_max_children_per_line(GTK_FLOW_BOX(g_emoji_chips), 5);
+    gtk_flow_box_set_min_children_per_line(GTK_FLOW_BOX(g_emoji_chips), 1);
+    gtk_flow_box_set_row_spacing(GTK_FLOW_BOX(g_emoji_chips), 4);
+    gtk_flow_box_set_column_spacing(GTK_FLOW_BOX(g_emoji_chips), 4);
     gtk_flow_box_set_selection_mode(GTK_FLOW_BOX(g_emoji_chips), GTK_SELECTION_NONE);
     gtk_orientable_set_orientation(GTK_ORIENTABLE(g_emoji_chips), GTK_ORIENTATION_HORIZONTAL);
     gtk_widget_set_margin_start(g_emoji_chips, 8);

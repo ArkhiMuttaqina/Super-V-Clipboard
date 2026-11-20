@@ -1084,7 +1084,7 @@ fn populate_history(items: Vec<super_v_core::ClipboardItem>) {
         let subtitle = if is_image {
             format!("{} KB", (item.byte_size + 1023) / 1024)
         } else {
-            format!("{} \u{2022} {} B", item.category.as_str(), item.byte_size)
+            format!("{} B", item.byte_size)
         };
         let c_title = CString::new(title.replace('\0', "")).unwrap_or_default();
         let c_sub = CString::new(subtitle).unwrap_or_default();
