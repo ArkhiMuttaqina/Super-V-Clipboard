@@ -3730,11 +3730,16 @@ void super_v_ui_set_ai_config_values(const char *provider, const char *model,
 static void seed_ai_with(const char *text) {
     if (!g_ai_prompt || !text || !*text) return;
     GtkTextBuffer *buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(g_ai_prompt));
-    gtk_text_buffer_set_text(buf, text, -1);
+    /* Lead with an instruction, then the blocked text: pressing Generate
+     * immediately rewrites the block instead of echoing it back. */
+    char *seeded = g_strdup_printf(
+        "Perbaiki dan rapikan tulisan berikut, pertahankan makna dan bahasanya:\n\n%s", text);
+    gtk_text_buffer_set_text(buf, seeded, -1);
+    g_free(seeded);
     if (g_stack)
         adw_view_stack_set_visible_child_name(ADW_VIEW_STACK(g_stack), "ai");
     if (g_ai_prompt) gtk_widget_grab_focus(g_ai_prompt);
-    super_v_ui_set_ai_status("Text loaded — tell Clippo what to do with it");
+    super_v_ui_set_ai_status("Blok teks dimuat — tekan Generate");
 }
 
 static void on_ai_generate_clicked(GtkButton *btn, gpointer data) {
