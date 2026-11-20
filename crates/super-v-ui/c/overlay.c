@@ -131,6 +131,7 @@ static guint vanish_index_for(const char *mode) {
 }
 
 static void hide_main_window(void);
+static void seed_ai_with(const char *text);
 static void cancel_idle_exit(void);
 static void schedule_idle_exit(void);
 static GtkWidget *make_thumb(const char *path, int size);
@@ -217,6 +218,8 @@ static void install_css(void) {
         ".superv-overlay { background: transparent; }\n"
         ".section-row { background: transparent; box-shadow: none; border: none; padding: 0; min-height: 0; }\n"
         ".section-label { font-weight: 700; font-size: 88%; opacity: 0.6; margin: 10px 6px 2px 6px; }\n"
+        ".pin-badge { -gtk-icon-size: 16px; color: #f5c211; margin-top: 2px; }\n"
+        ".clip-image-thumb { border-radius: 8px; padding: 2px; }\n"
         ".variant-dot { font-size: 10px; opacity: 0.8; margin-bottom: 0; }\n"
         ".warning-banner { background-color: alpha(@warning_color, 0.18); border-radius: 10px; padding: 8px; }\n"
         ".superv-card { background-color: @window_bg_color; border-radius: 14px; border: 1px solid @borders; box-shadow: 0 8px 28px rgba(0,0,0,0.35); }\n";
@@ -294,9 +297,18 @@ static gboolean click_hit_button(GtkWidget *row, double x, double y) {
 }
 
 static void on_row_click_released(GtkGestureClick *gesture, int n_press, double x, double y, gpointer data) {
-    (void)gesture; (void)n_press;
     GtkWidget *row = GTK_WIDGET(data);
     if (click_hit_button(row, x, y)) return;
+    GdkModifierType mods = gtk_event_controller_get_current_event_state(
+        GTK_EVENT_CONTROLLER(gesture));
+    if (mods & GDK_SHIFT_MASK) {
+        /* Shift-click a history row -> writing assistant, not paste. */
+        const char *text = (const char *)g_object_get_data(G_OBJECT(row), "super_v_text");
+        if (text && *text) {
+            seed_ai_with(text);
+            return;
+        }
+    }
     on_history_row_activated(ADW_ACTION_ROW(row), NULL);
 }
 static gboolean g_last_paste_had_texture = FALSE;
@@ -693,12 +705,31 @@ void super_v_ui_add_history_item(const char *title, const char *subtitle, int is
     *heap_id = (gint64)id;
     g_object_set_data_full(G_OBJECT(row), "super_v_id", heap_id, g_free);
 
-    if (preview_image_path && *preview_image_path) {
-        GtkWidget *thumb = make_thumb(preview_image_path, 56);
-        if (thumb) adw_action_row_add_prefix(ADW_ACTION_ROW(row), thumb);
-    } else if (mime && g_str_has_prefix(mime, "image/")) {
-        GtkWidget *icon = gtk_image_new_from_icon_name("image-x-generic-symbolic");
-        adw_action_row_add_prefix(ADW_ACTION_ROW(row), icon);
+    gboolean is_image = (preview_image_path && *preview_image_path)
+        || (mime && g_str_has_prefix(mime, "image/"));
+    if (is_image) {
+        /* Images lead with the picture, not a filename: a 96px crop is
+         * recognizable at a glance, and the mime label is noise. */
+        GtkWidget *thumb = (preview_image_path && *preview_image_path)
+            ? make_thumb(preview_image_path, 96) : NULL;
+        if (thumb) {
+            gtk_widget_add_css_class(thumb, "clip-image-thumb");
+            adw_action_row_add_prefix(ADW_ACTION_ROW(row), thumb);
+            gtk_widget_set_size_request(GTK_WIDGET(row), -1, 104);
+        } else {
+            GtkWidget *icon = gtk_image_new_from_icon_name("image-x-generic-symbolic");
+            gtk_image_set_pixel_size(GTK_IMAGE(icon), 48);
+            adw_action_row_add_prefix(ADW_ACTION_ROW(row), icon);
+        }
+    }
+
+    if (is_pinned) {
+        GtkWidget *pin = gtk_image_new_from_icon_name("starred-symbolic");
+        gtk_image_set_pixel_size(GTK_IMAGE(pin), 16);
+        gtk_widget_set_tooltip_text(pin, "Pinned — never auto-deleted");
+        gtk_widget_add_css_class(pin, "pin-badge");
+        gtk_widget_set_valign(pin, GTK_ALIGN_CENTER);
+        adw_action_row_add_suffix(ADW_ACTION_ROW(row), pin);
     }
 
     if (is_sensitive) {
@@ -2152,9 +2183,19 @@ static GdkPixbuf *fit_pixbuf(GdkPixbuf *src, int size) {
  * the fitted result: blobs are content-addressed by sha256, so a path always
  * holds the same pixels and a cache entry can never go stale. */
 #define THUMB_WORKERS 3
-#define THUMB_CACHE_MAX 512
+/* A pixbuf at 96px costs ~36 KB, so a count cap of 512 held ~18 MB of
+ * decoded images for rows that scrolled out of view long ago. Budget bytes
+ * instead: the cache now tops out around 6 MB whatever the thumb size is. */
+#define THUMB_CACHE_BYTES (6 * 1024 * 1024)
 
 static GHashTable *g_thumb_cache = NULL;   /* "size|path" -> fitted GdkPixbuf */
+static gsize g_thumb_cache_bytes = 0;
+
+static void thumb_cache_reset(void) {
+    if (!g_thumb_cache) return;
+    g_hash_table_remove_all(g_thumb_cache);
+    g_thumb_cache_bytes = 0;
+}
 static GMutex g_thumb_gate;
 static GCond g_thumb_cond;
 static int g_thumb_active = 0;
@@ -2181,10 +2222,10 @@ static void deliver_thumb(gpointer data) {
         g_thumb_cache = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_object_unref);
     }
     if (ready->pix) {
-        if (g_hash_table_size(g_thumb_cache) >= THUMB_CACHE_MAX) {
-            g_hash_table_remove_all(g_thumb_cache);
-        }
+        gsize cost = (gsize)gdk_pixbuf_get_byte_length(ready->pix);
+        if (g_thumb_cache_bytes + cost > THUMB_CACHE_BYTES) thumb_cache_reset();
         g_hash_table_insert(g_thumb_cache, g_strdup(ready->key), ready->pix);
+        g_thumb_cache_bytes += cost;
     }
     if (g_getenv("SUPER_V_DEBUG_THUMBS")) {
         g_printerr("THUMB %s %s\n", ready->pix ? "decoded" : "failed", ready->key);
@@ -3681,6 +3722,19 @@ void super_v_ui_set_ai_config_values(const char *provider, const char *model,
     g_free(g_ai_cfg_key); g_ai_cfg_key = g_strdup(key ? key : "");
     g_free(g_ai_cfg_base); g_ai_cfg_base = g_strdup(base ? base : "");
     apply_ai_config_to_rows();
+}
+
+/* He blocks a chunk of text, clicks Clippo AI, and expects the assistant to
+ * work on THAT text. Shift-clicking a history row (or having a primary
+ * selection) seeds the prompt instead of pasting. */
+static void seed_ai_with(const char *text) {
+    if (!g_ai_prompt || !text || !*text) return;
+    GtkTextBuffer *buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(g_ai_prompt));
+    gtk_text_buffer_set_text(buf, text, -1);
+    if (g_stack)
+        adw_view_stack_set_visible_child_name(ADW_VIEW_STACK(g_stack), "ai");
+    if (g_ai_prompt) gtk_widget_grab_focus(g_ai_prompt);
+    super_v_ui_set_ai_status("Text loaded — tell Clippo what to do with it");
 }
 
 static void on_ai_generate_clicked(GtkButton *btn, gpointer data) {

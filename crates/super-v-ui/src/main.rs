@@ -90,8 +90,9 @@ fn glyph_index() -> &'static GlyphIndex {
 }
 
 /// Building the index parses ~500 KB of embedded data and composes the variant
-/// keyword tables, roughly 9 ms. Run it on a background thread at startup so the
-/// first emoji tab never pays that cost on the GTK main thread.
+/// keyword tables (~31 ms, ~3.9 MB RSS: emojis, symbols, tone variants, i18n
+/// keyword maps). Built on a background thread at startup so the first emoji
+/// tab never pays that cost on the GTK main thread.
 fn warm_glyph_index() {
     std::thread::spawn(|| {
         let started = std::time::Instant::now();
@@ -1035,8 +1036,17 @@ extern "C" fn on_delete_item(id: libc::c_longlong) {
 /* Primary instance only: refresh live history from the daemon. */
 fn populate_history(items: Vec<super_v_core::ClipboardItem>) {
     for item in items {
-        let title = item.text.unwrap_or_else(|| format!("[{}]", item.mime));
-        let subtitle = format!("{} \u{2022} {} B", item.category.as_str(), item.byte_size);
+        let is_image = item.mime.starts_with("image/");
+        /* Images speak for themselves — a bare thumbnail plus a size, no
+         * "[image/png]" filename stand-in in the title. */
+        let title = item.text
+            .filter(|t| !t.trim().is_empty())
+            .unwrap_or_else(|| if is_image { "Gambar".to_string() } else { format!("[{}]", item.mime) });
+        let subtitle = if is_image {
+            format!("{} KB", (item.byte_size + 1023) / 1024)
+        } else {
+            format!("{} \u{2022} {} B", item.category.as_str(), item.byte_size)
+        };
         let c_title = CString::new(title.replace('\0', "")).unwrap_or_default();
         let c_sub = CString::new(subtitle).unwrap_or_default();
         let c_blob = CString::new(item.blob_path.unwrap_or_default()).unwrap_or_default();
