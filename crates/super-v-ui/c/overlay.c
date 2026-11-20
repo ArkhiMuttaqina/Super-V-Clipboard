@@ -827,7 +827,7 @@ void super_v_ui_add_history_item(const char *title, const char *subtitle, int is
     *heap_id = (gint64)id;
     g_object_set_data_full(G_OBJECT(row), "super_v_id", heap_id, g_free);
 
-    g_signal_connect(row, "activated", G_CALLBACK(on_history_row_activated), NULL);
+
     GtkGesture *row_click = gtk_gesture_click_new();
     gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(row_click), GDK_BUTTON_PRIMARY);
     g_signal_connect(row_click, "released", G_CALLBACK(on_row_click_released), row);
