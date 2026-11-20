@@ -1358,6 +1358,9 @@ static void on_tab_switched(GObject *obj, GParamSpec *pspec, gpointer user_data)
     apply_entry_text(saved_query_for(name));
 
     if (g_search_entry) gtk_widget_set_visible(g_search_entry, strcmp(name, "ai") != 0);
+    /* Category chips only belong to the emoji tab. */
+    if (g_emoji_chips)
+        gtk_widget_set_visible(g_emoji_chips, strcmp(name, "emoji") == 0);
 
     if (strcmp(name, "ai") == 0) {
         if (g_ai_prompt) gtk_widget_grab_focus(g_ai_prompt);
